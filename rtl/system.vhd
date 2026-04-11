@@ -22,6 +22,8 @@ entity system is
 		systeme:		in  STD_LOGIC;
 		-- sg:			in	 STD_LOGIC;		-- sg1000
 		bios_en:	in	 STD_LOGIC;
+		ext_bios_sel:    in STD_LOGIC;
+		ext_bios_loaded: in STD_LOGIC;
 
 		GG_EN		: in std_logic; -- Game Genie not game gear
 		GG_CODE		: in std_logic_vector(128 downto 0); -- game genie code
@@ -117,7 +119,8 @@ entity system is
 		ROMCL  : IN  STD_LOGIC;
 		ROMAD  : IN STD_LOGIC_VECTOR(24 downto 0);
 		ROMDT  : IN STD_LOGIC_VECTOR(7 downto 0);
-		ROMEN  : IN  STD_LOGIC
+		ROMEN  : IN  STD_LOGIC;
+		BIOSWEN: IN  STD_LOGIC
 
 	);
 end system;
@@ -162,7 +165,12 @@ architecture Behavioral of system is
 	signal vram2_WR:			std_logic;
 
 	signal boot_rom_D_out:	std_logic_vector(7 downto 0);
-	
+	signal ext_bios_D_out:	std_logic_vector(7 downto 0);
+	signal active_bios_D_out: std_logic_vector(7 downto 0);
+	signal ext_bios_addr:   std_logic_vector(17 downto 0);
+	signal ext_bios_wren:   std_logic;
+	signal rom_a_i:         std_logic_vector(21 downto 0);
+
 	signal bootloader_n:	std_logic := '0';
 	signal irom_D_out:		std_logic_vector(7 downto 0);
 	signal irom_RD_n:			std_logic := '1';
@@ -569,7 +577,28 @@ port map(
 		address	=> A(13 downto 0),
 		q			=> boot_rom_D_out
 	);
-	
+
+	-- Drive the output port from the internal signal
+	rom_a <= rom_a_i;
+
+	-- External BIOS RAM: up to 256KB, written only during BIOS file download (BIOSWEN)
+	-- Read address uses rom_a_i (mapper-translated) so banking works correctly
+	ext_bios_wren <= BIOSWEN;
+	ext_bios_addr <= ROMAD(17 downto 0) when BIOSWEN='1' else rom_a_i(17 downto 0);
+
+	ext_bios_inst : entity work.spram
+	generic map
+	(
+		widthad_a=> 18
+	)
+	port map
+	(
+		clock		=> clk_sys,
+		address	=> ext_bios_addr,
+		wren		=> ext_bios_wren,
+		data		=> ROMDT,
+		q			=> ext_bios_D_out
+	);	
 	mc8123_inst : component MC8123_rom_decrypt
 	port map
 	(
@@ -626,13 +655,40 @@ port map(
 		if rising_edge(clk_sys) then
 			if RESET_n='0' then 
 				bootloader_n <= not bios_en;
-			elsif ctl_WR_n='0' and bootloader_n='0' then
-				bootloader_n <= '1';
+			elsif ctl_WR_n='0' then
+				if ext_bios_sel='1' and ext_bios_loaded='1' then
+					-- For external BIOS: honour port $3E bit 3 (active low BIOS enable)
+					-- bit3=0 -> BIOS ROM enabled -> bootloader_n=0
+					-- bit3=1 -> BIOS ROM disabled (cartridge enabled) -> bootloader_n=1
+					bootloader_n <= D_in(3);
+				elsif bootloader_n='0' then
+					-- Internal BIOS (mboot.mif): any write disables BIOS, original behaviour
+					bootloader_n <= '1';
+				end if;
 			end if;
 		end if;
 	end process;
-	
-	irom_D_out <=	boot_rom_D_out when bootloader_n='0' and A(15 downto 14)="00"
+
+	-- Reset the mapper to default state whenever the BIOS hands control to the
+	-- cartridge (bootloader_n goes 0->1 via port $3E). Merged into the mapper
+	-- process below to avoid multiple drivers on the bank registers.
+
+	-- When ext BIOS is active and BIOS ROM is enabled (bootloader_n=0):
+	-- serve all ROM banks (0, 1, 2) from SPRAM so the full 256KB BIOS can run.
+	-- When BIOS ROM is disabled (bootloader_n=1, triggered by port $3E bit3=1):
+	-- serve SDRAM (cartridge) so the BIOS detection code (running from RAM) can
+	-- read the cartridge header. The BIOS then re-enables itself (bit3=0) if no
+	-- valid cart is found, causing bootloader_n to go back to 0, and JP $0000
+	-- will fall back into the SPRAM BIOS - giving the correct no-cart loop.
+	active_bios_D_out <= ext_bios_D_out when (ext_bios_sel='1' and ext_bios_loaded='1') else boot_rom_D_out;
+
+	irom_D_out <=	active_bios_D_out when (bootloader_n='0' and A(15 downto 14)="00")
+	               else ext_bios_D_out when (bootloader_n='0' and ext_bios_sel='1' and ext_bios_loaded='1' and A(15 downto 14)/="11")
+	               -- Empty cartridge slot: data lines float high on real hardware.
+	               -- Without this, SDRAM returns stale data from the last loaded ROM,
+	               -- causing BIOSes that check for non-0xFF bytes (Korea) to
+	               -- incorrectly detect a cartridge when none is present.
+	               else x"FF" when (bootloader_n='1' and dbr='0')
 	               else segadect2_D_out when (encrypt(1 downto 0)="10" and A(15)='0')
 						else mc8123_D_out when (encrypt(0)='1' and A(15)='0') or (encrypt(1 downto 0)="11" and A(14)='0') else rom_do;
 	
@@ -806,45 +862,45 @@ port map(
 		end if;
 	end process;
 
-	rom_a(12 downto 0) <= A(12 downto 0);
+	rom_a_i(12 downto 0) <= A(12 downto 0);
 	process (A,bank0,bank1,bank2,bank3,mapper_msx,mapper_codies,systeme,rom_bank)
 	begin
 		if systeme = '1' then
 			case A(15 downto 14) is
 			when "10" =>	
-				rom_a(21 downto 13) <= "0000" & rom_bank & A(13);
+				rom_a_i(21 downto 13) <= "0000" & rom_bank & A(13);
 			when others =>
-				rom_a(21 downto 13) <= "000100" & A(15 downto 13);
+				rom_a_i(21 downto 13) <= "000100" & A(15 downto 13);
 			end case;
 		elsif mapper_msx = '1' then
 			case A(15 downto 13) is
 			when "010" =>	
-				rom_a(21 downto 13) <= '0' & bank0;
+				rom_a_i(21 downto 13) <= '0' & bank0;
 			when "011" =>
-				rom_a(21 downto 13) <= '0' & bank1;
+				rom_a_i(21 downto 13) <= '0' & bank1;
 			when "100" =>
-				rom_a(21 downto 13) <= '0' & bank2;
+				rom_a_i(21 downto 13) <= '0' & bank2;
 			when "101" =>
-				rom_a(21 downto 13) <= '0' & bank3;
+				rom_a_i(21 downto 13) <= '0' & bank3;
 			when others =>
-				rom_a(21 downto 13) <= "000000" & A(15 downto 13);
+				rom_a_i(21 downto 13) <= "000000" & A(15 downto 13);
 			end case;
 		else
-			rom_a(13) <= A(13);
+			rom_a_i(13) <= A(13);
 			case A(15 downto 14) is
 			when "00" =>
 				-- first kilobyte is always from bank 0
 				if A(13 downto 10)="0000" and mapper_codies='0' then
-					rom_a(21 downto 14) <= (others=>'0');
+					rom_a_i(21 downto 14) <= (others=>'0');
 				else
-					rom_a(21 downto 14) <= bank0;
+					rom_a_i(21 downto 14) <= bank0;
 				end if;
 
 			when "01" =>
-				rom_a(21 downto 14) <= bank1;
+				rom_a_i(21 downto 14) <= bank1;
 			
 			when others =>
-				rom_a(21 downto 14) <= bank2;
+				rom_a_i(21 downto 14) <= bank2;
 
 			end case;
 		end if;

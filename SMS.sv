@@ -184,7 +184,7 @@ assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 
 assign {SD_SCK, SD_MOSI, SD_CS} = '1;
 
-assign LED_USER  = cart_download | bk_state | (status[25] & bk_pending);
+assign LED_USER  = cart_download | bios_download | bk_state | (status[25] & bk_pending);
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = osd_btn;
@@ -275,7 +275,8 @@ parameter CONF_STR = {
 	"H8-;",
 
 	"H8OA,Region,US/EU,Japan;",
-	"H8OB,BIOS,Enable,Disable;",
+	"H8oBC,BIOS,Disable,Internal,Ext. File;",
+	"H8FS3,BINSMS,Load Ext. BIOS;",
 	"H8OF,Disable Mapper,No,Yes;",
 	"H8o8,Z80 Speed,Normal,Turbo;",
 	"H8-;",
@@ -317,6 +318,7 @@ parameter CONF_STR = {
 	"P2o56,Paddle Control,Disabled,Paddle,Joy;",
 
 	"-;",
+	"H8R9,Eject ROM;",
 	"R0,Reset;",
 	"J1,Fire 1,Fire 2,Pause,Coin,Arcade 3;",
 	"jn,A|P,B,Start,Coin,X;",
@@ -397,7 +399,48 @@ always @(posedge CLK_50M) begin
 	end
 end
 
-wire reset = RESET | status[0] | buttons[1] | cart_download | bk_loading;
+// BIOS and System Reset Control
+reg        ext_bios_loaded = 0;
+reg        old_bios_download;
+reg  [1:0] old_bios_mode;
+reg [21:0] reset_timer;
+reg        bios_config_reset;
+
+always_ff @(posedge clk_sys) begin
+	old_bios_download <= bios_download;
+	old_bios_mode     <= status[44:43];
+
+	// Set ext_bios_loaded ONLY after download completes
+	if (old_bios_download && !bios_download) begin
+		ext_bios_loaded <= 1;
+	end
+
+	// Generate a 40ms pulse (at 50MHz) on BIOS config change or download
+	if ((old_bios_mode != status[44:43]) || (old_bios_download ^ bios_download)) begin
+		reset_timer <= 22'd2000000;
+	end else if (reset_timer > 0) begin
+		reset_timer <= reset_timer - 1'd1;
+	end
+
+	bios_config_reset <= (reset_timer > 0);
+end
+
+wire raw_reset = RESET | status[0] | buttons[1] | cart_download | bios_download | bios_config_reset | bk_loading | eject_rom;
+
+reg [13:0] ram_clr_addr;
+reg        ram_clr_run = 0;
+
+always_ff @(posedge clk_sys) begin
+	if (raw_reset) begin
+		ram_clr_addr <= 0;
+		ram_clr_run  <= 1'b1;
+	end else if (ram_clr_run) begin
+		ram_clr_addr <= ram_clr_addr + 1'd1;
+		if (ram_clr_addr == 14'h3FFF) ram_clr_run <= 1'b0;
+	end
+end
+
+wire reset_active = raw_reset | ram_clr_run;
 
 //////////////////   HPS I/O   ///////////////////
 wire [15:0] joy_0, joy_1, joy_2, joy_3;
@@ -486,7 +529,13 @@ wire        ram_rd;
 
 wire code_index = &ioctl_index;
 wire code_download = ioctl_download & code_index;
-wire cart_download = ioctl_download & ~code_index & (ioctl_index!=4) & (ioctl_index!=254);
+wire bios_download = ioctl_download & (ioctl_index[4:0] == 3);
+wire cart_download = ioctl_download & ~code_index & (ioctl_index[4:0]!=3) & (ioctl_index!=4) & (ioctl_index!=254);
+
+// BIOS mode: status[44:43] == 2'b00->Disable, 01->Internal, 10->Ext. File
+wire bios_en      = (status[44:43] != 2'b00) & ~systeme;
+wire ext_bios_sel = (status[44:43] == 2'b10);
+wire eject_rom    = status[9];
 
 // SYSMODE[0]: [0]=EncryptBase,[1]=EncryptBank,[2]=Paddle,[3]=Pedal,[4,5]=E0Type,[6]=E1,[7]=E2
 // SYSMODE[1]: [0]=
@@ -570,9 +619,9 @@ always @(posedge clk_sys) begin
 	reg old_download, old_reset;
 
 	old_download <= cart_download;
-	old_reset <= reset;
+	old_reset <= reset_active;
 
-	if(~old_reset && reset) ioctl_wait <= 0;
+	if(~old_reset && reset_active) ioctl_wait <= 0;
 	if(~old_download && cart_download) romwr_a <= 0;
 	else begin
 		if(ioctl_wr & cart_download) begin
@@ -628,8 +677,10 @@ end
 
 reg dbr = 0;
 always @(posedge clk_sys) begin
-	if(cart_download || bk_loading) dbr <= 1;
+	if(eject_rom) dbr <= 0;
+	else if(cart_download) dbr <= 1;
 end
+// [Handled in unified control block above]
 
 reg        gg          = 0;
 reg        systeme     = 0;
@@ -641,7 +692,12 @@ always @(posedge clk_sys) begin
 	reg old_download;
 	old_download <= cart_download;
 
-	if (ioctl_wr & cart_download) begin
+	if (eject_rom) begin
+		cart_mask <= 0;
+		cart_mask512 <= 0;
+		cart_sz512 <= 0;
+		gg <= 0;
+	end else if (ioctl_wr & cart_download) begin
 		cart_mask <= cart_mask | ioctl_addr[21:0];
 		cart_mask512 <= cart_mask512 | (ioctl_addr[21:0] - 10'd512);
 		if (!ioctl_addr)
@@ -683,9 +739,12 @@ system #(63) system
 	.gg(gg),
 	.ggres(ggres),
 	.systeme(systeme),
-	.bios_en(~status[11] & ~systeme),
+	.bios_en(bios_en),
+	.ext_bios_sel(ext_bios_sel),
+	.ext_bios_loaded(ext_bios_loaded),
+	.dbr(dbr),
 
-	.RESET_n(~reset),
+	.RESET_n(~reset_active),
 
 	.GG_RESET(ioctl_download && ioctl_wr && !ioctl_addr),
 	.GG_EN(status[24]),
@@ -757,7 +816,6 @@ system #(63) system
 	.audioL(audio_l),
 	.audioR(audio_r),
 
-	.dbr(dbr),
 	.sp64(status[8]),
 
 	.ram_a(ram_a),
@@ -777,7 +835,8 @@ system #(63) system
 	.ROMCL(clk_sys),
 	.ROMAD(ioctl_addr),
 	.ROMDT(ioctl_dout),
-	.ROMEN(ioctl_wr & ioctl_index==0)
+	.ROMEN(ioctl_wr & ioctl_index==0),
+	.BIOSWEN(ioctl_wr & (ioctl_index[4:0]==3))
 );
 
 wire [12:0] key_a;
@@ -871,7 +930,7 @@ always @(posedge clk_sys) begin
 			end
 		end
 
-		if(reset | ~status[14]) jcnt <= 0;
+		if(reset_active | ~status[14]) jcnt <= 0;
 
 		USER_OUT <= 7'b1111111;
 	end
@@ -897,9 +956,9 @@ end
 spram #(.widthad_a(14)) ram_inst
 (
 	.clock     (clk_sys),
-	.address   (systeme ? ram_a : {1'b0,ram_a[12:0]}),
-	.wren      (ram_we),
-	.data      (ram_d),
+	.address   (ram_clr_run ? ram_clr_addr : (systeme ? ram_a : {1'b0,ram_a[12:0]})),
+	.wren      (ram_clr_run | ram_we),
+	.data      (ram_clr_run ? 8'h00 : ram_d),
 	.q         (ram_q)
 );
 
@@ -1114,7 +1173,7 @@ wire [1:0] gun_crosshair = status[23:22];
 lightgun lightgun
 (
 	.CLK(clk_sys),
-	.RESET(reset),
+	.RESET(reset_active),
 
 	.MOUSE(ps2_mouse),
 	.MOUSE_XY(&gun_mode),
