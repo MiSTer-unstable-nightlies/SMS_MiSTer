@@ -318,11 +318,12 @@ parameter CONF_STR = {
 	"P2o56,Paddle Control,Disabled,Paddle,Joy;",
 
 	"-;",
+	"H8RB,Soft Reset;",
 	"H8R9,Eject ROM;",
 	"R0,Reset;",
-	"J1,Fire 1,Fire 2,Pause,Coin,Arcade 3;",
-	"jn,A|P,B,Start,Coin,X;",
-	"jp,Y|P,A,Start,Coin,X;",
+	"J1,Fire 1,Fire 2,Pause,Coin,Arcade 3,Soft Reset;",
+	"jn,A|P,B,Start,Coin,X,Select;",
+	"jp,Y|P,A,Start,Coin,X,Select;",
 	"V,v",`BUILD_DATE
 };
 
@@ -536,6 +537,27 @@ wire cart_download = ioctl_download & ~code_index & (ioctl_index[4:0]!=3) & (ioc
 wire bios_en      = (status[44:43] != 2'b00) & ~systeme;
 wire ext_bios_sel = (status[44:43] == 2'b10);
 wire eject_rom    = status[9];
+
+// Soft Reset: maps to port $DD bit 4 (active-low) on SMS hardware.
+// The OSD 'R' item sets status[11]=1 as soon as the cursor lands on it and
+// clears it when the OSD closes. We trigger on the FALLING edge (1→0) so the
+// pulse fires after the OSD closes and the game is running again — not while
+// the menu is still open. The pulse is held for ~37ms so the game's polling
+// loop (running at 60fps) is guaranteed to see the button pressed.
+// Joy buttons are used at level (active while held).
+reg [20:0] soft_reset_cnt  = 0;
+reg        soft_reset_prev = 0;
+reg        soft_reset_btn;
+
+always @(posedge clk_sys) begin
+	soft_reset_prev <= status[11];
+	if (soft_reset_prev & ~status[11])      // falling edge: OSD item deselected
+		soft_reset_cnt <= 21'd2_000_000;    // ~37ms at 53MHz
+	else if (soft_reset_cnt != 0)
+		soft_reset_cnt <= soft_reset_cnt - 1'd1;
+	// Active while joystick button held OR during the OSD-triggered pulse
+	soft_reset_btn <= (soft_reset_cnt != 0) | joy_0[9] | joy_1[9];
+end
 
 // SYSMODE[0]: [0]=EncryptBase,[1]=EncryptBank,[2]=Paddle,[3]=Pedal,[4,5]=E0Type,[6]=E1,[7]=E2
 // SYSMODE[1]: [0]=
@@ -774,6 +796,7 @@ system #(63) system
 	.j2_tr(joyb[5]),
 	.j2_th(joyb_th),
 	.pause(joya[6]&joyb[6]),
+	.soft_reset(soft_reset_btn),
 	.j2_start(swap ? joy_0[11] : joy_1[11]),
 	.j2_coin(swap ? joy_0[10] : joy_1[10]),
 	.j2_a3(swap ? joy_0[8] : joy_1[8]),

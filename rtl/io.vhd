@@ -39,6 +39,7 @@ entity io is
 		j2_coin:	in  STD_LOGIC;
 		j2_a3:	in  STD_LOGIC;
 		Pause:	in  STD_LOGIC;
+		soft_reset: in STD_LOGIC;
 		E0Type:	in  STD_LOGIC_VECTOR(1 downto 0);
 		E1Use:	in	 STD_LOGIC;
 		E2Use:	in	 STD_LOGIC;
@@ -251,7 +252,11 @@ begin
 						D_out(6) <= J1_th;
 					end if;
 					D_out(5) <= '1';
-					D_out(4) <= '1';
+					-- Bit 4 = Reset button (active-low). On export SMS hardware this
+					-- is port $DD bit 4. On Japanese SMS, Mark III and Game Gear the
+					-- physical reset is wired differently, but we expose it here in
+					-- all modes so soft reset works across all system configurations.
+					D_out(4) <= not soft_reset;
 					-- 4=j2_tr
 					if ctrl(2)='0' and gg='0' then
 						D_out(3) <= ctrl(6);

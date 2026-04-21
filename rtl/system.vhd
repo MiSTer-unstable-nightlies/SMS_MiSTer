@@ -57,6 +57,7 @@ entity system is
 		j2_coin:		in  STD_LOGIC;
 		j2_a3:		in  STD_LOGIC;
 		pause:		in	 STD_LOGIC;
+		soft_reset:	in	 STD_LOGIC;
 		
 		E0Type:	in  STD_LOGIC_VECTOR(1 downto 0);
 		E1Use:	in	 STD_LOGIC;
@@ -535,6 +536,7 @@ port map(
 		J2_coin	=> j2_coin,
 		J2_a3		=> j2_a3,
 		Pause		=> pause,
+		soft_reset	=> soft_reset,
 		E0Type	=> E0Type,
 		E1Use		=> E1Use,
 		E2Use		=> E2Use,
