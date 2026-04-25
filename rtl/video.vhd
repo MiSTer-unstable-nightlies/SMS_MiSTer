@@ -13,7 +13,9 @@ entity video is
 		mask_column:	in  std_logic := '0';
 		cut_mask:		in	std_logic;
 		smode_M1:		in	 std_logic;
+		smode_M2:		in	 std_logic;
 		smode_M3:		in	 std_logic;
+		smode_M4:		in	 std_logic;
 		
 		x: 				out std_logic_vector(8 downto 0);
 		y:					out std_logic_vector(8 downto 0);
@@ -40,7 +42,7 @@ begin
 					vcount <= vcount + 1;
 					if pal = '1' then
 						-- VCounter: 0-258, 458-511 = 313 steps
-						if smode_M1='1' then
+						if smode_M1='1' and smode_M2='1' then
 							if vcount = 258 then
 								vcount <= conv_std_logic_vector(458,9); 
 							elsif vcount = 461 then
@@ -48,7 +50,7 @@ begin
 							elsif vcount = 464 then
 								vsync <= '0';
 							end if;
-						elsif smode_M3='1' then
+						elsif smode_M3='1' and smode_M2='1' then
 							if vcount = 266 then
 								vcount <= conv_std_logic_vector(482,9);
 							elsif vcount = 482 then
@@ -68,7 +70,7 @@ begin
 						end if;
 					else
 					-- NTSC mode 224 lines ...
-						if smode_M1='1' then
+						if smode_M1='1' and smode_M2='1' then
 							if vcount = 234 then 
 								vcount <= conv_std_logic_vector(485,9);
 							elsif vcount = 487 then
@@ -77,7 +79,7 @@ begin
 								vsync <= '0';
 							end if;
 					-- NTSC mode 240 lines -- this mode is not suposed to work anyway
-						elsif smode_M3='1' then 
+					elsif smode_M3='1' and smode_M2='1' then 
 							if vcount = 261 then -- needs to be > 240 to generate an IRQ
 								vcount <= conv_std_logic_vector(0,9);
 							elsif vcount = 257 then
@@ -115,16 +117,16 @@ begin
 	x	<= hcount;
 	y	<= vcount;
 
-	vbl_st  <= conv_std_logic_vector(184,9) when (smode_M1='1' and ggres='1')
-			else conv_std_logic_vector(224,9) when smode_M1 = '1'
-			else conv_std_logic_vector(240,9) when smode_M3 = '1'
+			vbl_st  <= conv_std_logic_vector(184,9) when (smode_M1='1' and smode_M2='1' and ggres='1')
+			else conv_std_logic_vector(224,9) when (smode_M1 = '1' and smode_M2 = '1')
+			else conv_std_logic_vector(240,9) when (smode_M3 = '1' and smode_M2 = '1')
 			else conv_std_logic_vector(216,9) when border = '1' and pal = '0'
 			else conv_std_logic_vector(240,9) when border = '1'
 			else conv_std_logic_vector(192,9) when ggres = '0'
 			else conv_std_logic_vector(168,9);
 			
 	vbl_end <= conv_std_logic_vector(40,9)  when (smode_M1='1' and ggres='1')
-			else conv_std_logic_vector(000,9) when smode_M1 = '1' or smode_M3 = '1' or (border = '0' and ggres = '0')
+			else conv_std_logic_vector(000,9) when (smode_M1 = '1' and smode_M2 = '1') or (smode_M3 = '1' and smode_M2 = '1') or (border = '0' and ggres = '0')
 			else conv_std_logic_vector(488,9) when border = '1' and pal = '0'
 			else conv_std_logic_vector(458,9) when border = '1'
 			else conv_std_logic_vector(024,9);

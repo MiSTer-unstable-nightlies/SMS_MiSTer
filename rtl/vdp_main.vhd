@@ -30,6 +30,7 @@ entity vdp_main is
 		mask_column0:		in  std_logic;
 		black_column:			in  std_logic;
 		smode_M1:			in  std_logic;
+		smode_M2:			in  std_logic;
 		smode_M3:			in  std_logic;
 		smode_M4:			in  std_logic;
 		ysj_quirk:			in  std_logic;
@@ -104,10 +105,10 @@ begin
 		vram_D			=> vram_D,		
 		color				=> bg_color,
 		smode_M1			=> smode_M1,
+		smode_M2			=> smode_M2,
 		smode_M3			=> smode_M3,
 		smode_M4			=> smode_M4,
 		ysj_quirk			=> ysj_quirk,
-		
 		priority			=> bg_priority);
 		
 	vdp_spr_inst: entity work.vdp_sprites
@@ -141,7 +142,7 @@ begin
 		variable bg_active	: boolean;
 	begin
 		y1 <= '1';
-		if ((x>48 and x<=208) or (ggres='0' and x<=256 and x>0)) and -- thank you slingshot
+	if ((x>48 and x<=208) or (ggres='0' and x<=256 and x>0)) and -- thank you slingshot
  			(mask_column0='0' or x>=9) and display_on='1' then
 			if (((y>=24 and y<168) and smode_M1='0')
 				or ((y>=40 and y<184) and smode_M1='1')

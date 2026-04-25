@@ -14,6 +14,7 @@ port (
 	scroll_x:			in  std_logic_vector(7 downto 0);
 	disable_hscroll:	in  std_logic;
 	smode_M1:			in  std_logic;
+	smode_M2:			in  std_logic;
 	smode_M3:			in  std_logic;
 	smode_M4:			in  std_logic;
 	ysj_quirk:			in  std_logic;
@@ -37,6 +38,7 @@ architecture rtl of vdp_background is
 	signal priority_latch: std_logic;
 	signal flip_x			: std_logic;
 
+	signal datap			: std_logic_vector(7 downto 0);
 	signal datac			: std_logic_vector(7 downto 0);
 	signal data0			: std_logic_vector(7 downto 0);
 	signal data1			: std_logic_vector(7 downto 0);
@@ -109,11 +111,21 @@ begin
 				else 
 					case x(2 downto 0) is
 					when "000" => vram_A <= table_address & y(7 downto 3) & x(7 downto 3);
-					when "010" => vram_A <= pt_address(13) & ( y(7 downto 6) and pt_address(12 downto 11) )&
-									tile_index(7 downto 0) & y(2 downto 0);
-					when "011" => vram_A <= ct_address(13) & ( y(7 downto 6) and ct_address(12 downto 11) )&
-								   tile_index(7 downto 0) &
-									y(2 downto 0);
+				when "010" => 
+					if smode_M2 = '1' then -- Graphics II (Mode 2)
+						vram_A <= pt_address(13) & ( y(7 downto 6) and pt_address(12 downto 11) )&
+										tile_index(7 downto 0) & y(2 downto 0);
+					else -- Default / Graphics I / Text
+						vram_A <= pt_address(13 downto 11) & tile_index(7 downto 0) & y(2 downto 0);
+					end if;
+				when "011" => 
+					if smode_M2 = '1' then -- Graphics II (Mode 2)
+						vram_A <= ct_address(13) & 
+										( (y(7 downto 6) & tile_index(7 downto 3)) and ct_address(12 downto 6) ) &
+										tile_index(2 downto 0) & y(2 downto 0);
+					else -- Default / Graphics I
+						vram_A <= ct_address(13 downto 6) & '0' & tile_index(7 downto 3);
+					end if;
 					when others =>
 					end case;	
 				end if ;
@@ -151,16 +163,18 @@ begin
 					when "001" =>
 						tile_index(7 downto 0) <= vram_D;
 					when "011" =>
-						datac <= vram_D;
-					when "100" =>
-						flip_x <= '0' ;
-						palette <='0' ;
-						priority_latch <= '0' ;
-						for i in 0 to 7 loop
-							data0(i) <= (not datac(i) and vram_D(0)) or (datac(i) and vram_D(4)) ; 
-							data1(i) <= (not datac(i) and vram_D(1)) or (datac(i) and vram_D(5)) ; 
-							data2(i) <= (not datac(i) and vram_D(2)) or (datac(i) and vram_D(6)) ; 
-							data3(i) <= (not datac(i) and vram_D(3)) or (datac(i) and vram_D(7)) ; 
+					datap <= vram_D;
+				when "101" =>
+					datac <= vram_D;
+				when "110" =>
+					flip_x <= '0' ;
+					palette <='0' ;
+					priority_latch <= '0' ;
+					for i in 0 to 7 loop
+						data0(i) <= (datap(i) and datac(4)) or (not datap(i) and datac(0)); 
+						data1(i) <= (datap(i) and datac(5)) or (not datap(i) and datac(1)); 
+						data2(i) <= (datap(i) and datac(6)) or (not datap(i) and datac(2)); 
+						data3(i) <= (datap(i) and datac(7)) or (not datap(i) and datac(3)); 
 						end loop;
 					when others =>
 					end case;
