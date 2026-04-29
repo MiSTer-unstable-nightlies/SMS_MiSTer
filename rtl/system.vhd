@@ -97,6 +97,7 @@ entity system is
 		pal:				in STD_LOGIC;
 		region:			in	STD_LOGIC;
 		mapper_lock:	in STD_LOGIC;
+		mapper_zemina_force : in STD_LOGIC;   -- Force Zemina mapper (OSD override)
 		vdp_enables:	in STD_LOGIC_VECTOR(1 downto 0);
 		psg_enables:	in STD_LOGIC_VECTOR(1 downto 0);
 
@@ -258,6 +259,30 @@ architecture Behavioral of system is
 	signal mapper_msx_lock :   boolean := false ;
 	signal mapper_msx :		   std_logic := '0' ;
 
+	-- 4-PAK All Action mapper signals (HES 4 PAK All Action)
+	-- References: MAME sega8_4pak_device (src/devices/bus/sega8/rom.cpp)
+	signal mapper_4pak :		std_logic := '0';
+	signal pak4_reg0 :		std_logic_vector(7 downto 0) := "00000000"; -- written at $3FFE
+	signal pak4_reg2 :		std_logic_vector(7 downto 0) := "00000000"; -- written at $BFFF
+
+	-- Zemina/Nemesis mapper family (MAME: sega8_zemina_device / sega8_nemesis_device)
+	-- Zemina:    8KB banking via writes to $0000-$0003; $0000-$1FFF starts from page 0.
+	-- Nemesis I: same as Zemina but $0000-$1FFF initially reads from the LAST 8KB page.
+	-- Nemesis II: uses plain Zemina banking (nem_bank0 = 0), detected by CRC.
+	--   Both Nemesis variants auto-detected via CRC16-CCITT of the last 8KB block.
+	signal mapper_zemina_det  : std_logic := '0';  -- auto-detected by write to $0002/$0003
+	signal nem_bank0          : std_logic_vector(7 downto 0) := "00000000";  -- $0000-$1FFF bank
+	signal use_zem            : std_logic;  -- active for any Zemina-family mapper
+	-- CRC16-CCITT (poly 0x1021, init 0xFFFF) of last 8KB block, accumulated during ROM load
+	signal rom_crc16_run      : std_logic_vector(15 downto 0) := x"FFFF";
+	signal rom_size_pages     : std_logic_vector(7 downto 0)  := (others => '0');
+	-- Nemesis I  (0xEE05): Zemina banking + $0000-$1FFF mapped to last 8KB page at startup
+	-- Nemesis II+ (other CRCs): plain Zemina banking ($0000-$1FFF = page 0), no special startup page
+	signal mapper_nemesis_auto  : std_logic;  -- '1' for Nemesis I (CRC 0xEE05) - needs last-page boot
+	signal mapper_zemina_crc    : std_logic;  -- '1' for other Zemina CRC matches - plain Zemina
+	signal reset_n_prev         : std_logic := '0';  -- for synchronous rising-edge detection of RESET_n
+	signal bootloader_n_prev    : std_logic := '1';  -- for rising-edge detection of bootloader_n (BIOS->cart handoff)
+
 	signal mc8123_D_out    : std_logic_vector(7 downto 0);
 	signal segadect2_D_out : std_logic_vector(7 downto 0);
 
@@ -309,7 +334,26 @@ architecture Behavioral of system is
 		ROMEN  : IN  STD_LOGIC
 	);
 	END COMPONENT;
-	
+
+	-- CRC16-CCITT one-byte update: poly=0x1021, init=0xFFFF, MSB-first, no reflection.
+	-- Equivalent to Python: binascii.crc_hqx(bytes([byte_in]), crc_in)
+	function crc16_ccitt_byte(
+		crc_in  : std_logic_vector(15 downto 0);
+		byte_in : std_logic_vector(7 downto 0)
+	) return std_logic_vector is
+		variable crc : std_logic_vector(15 downto 0);
+	begin
+		crc := crc_in;
+		for i in 7 downto 0 loop
+			if (crc(15) xor byte_in(i)) = '1' then
+				crc := (crc(14 downto 0) & '0') xor x"1021";
+			else
+				crc := crc(14 downto 0) & '0';
+			end if;
+		end loop;
+		return crc;
+	end function;
+
 begin
 
 	-- Game Genie
@@ -641,7 +685,9 @@ port map(
 	rom_a <= rom_a_i;
 
 	-- External BIOS RAM: up to 256KB, written only during BIOS file download (BIOSWEN)
-	-- Read address uses rom_a_i (mapper-translated) so banking works correctly
+	-- Read address uses rom_a_i (mapper-translated) so banking works correctly.
+	-- The Zemina mapper is gated off during BIOS execution (see rom_a_i process),
+	-- so large banked BIOSes (e.g. Korean) use the standard Sega mapper here.
 	ext_bios_wren <= BIOSWEN;
 	ext_bios_addr <= ROMAD(17 downto 0) when BIOSWEN='1' else rom_a_i(17 downto 0);
 
@@ -869,23 +915,91 @@ port map(
 			lock_mapper_B <= '0' ;
 			mapper_codies <= '0' ;
 			mapper_codies_lock <= '0' ;
+			mapper_4pak <= '0' ;
+			pak4_reg0 <= "00000000" ;
+			pak4_reg2 <= "00000000" ;
+			mapper_zemina_det <= '0' ;
+			nem_bank0 <= (others => '0');
+			reset_n_prev <= '0';
+			bootloader_n_prev <= '1';
+
 		else
 			if rising_edge(clk_sys) then
+				-- On the first clock after RESET_n rises, set nem_bank0 for Nemesis I.
+				-- rom_crc16_run and rom_size_pages are stable at this point because
+				-- cart_download holds RESET_n low throughout the entire ROM transfer.
+				if RESET_n = '1' and reset_n_prev = '0' then
+					if mapper_nemesis_auto = '1' then
+						nem_bank0 <= std_logic_vector(unsigned(rom_size_pages) - 1);
+					end if;
+				end if;
+				reset_n_prev <= RESET_n;
+				bootloader_n_prev <= bootloader_n;
 				if WR_n='1' and MREQ_n='0' then
 					last_read_addr <= A; -- gyurco anti-ldir patch
 				end if;
+
 				if systeme = '1' or sc3000_en = '1' then
 					-- no System E or SC-3000 mappers
-				elsif mapper_msx = '1' then
+				elsif mapper_4pak = '1' then
+					-- 4-PAK All Action mapper (per MAME sega8_4pak_device):
+					-- $3FFE: reg0=D; bank0=D; bank2=(reg0[5:4]+reg2)
+					-- $7FFF: bank1=D (independent)
+					-- $BFFF: reg2=D; bank2=(reg0[5:4]+D)
+					if WR_n='0' and MREQ_n='0' then
+						if A=x"3FFE" then
+							pak4_reg0 <= D_in;
+							bank0 <= D_in;
+							bank2 <= std_logic_vector(
+								("00" & unsigned(D_in(5 downto 4)) & "0000") +
+								unsigned(pak4_reg2));
+						elsif A=x"7FFF" then
+							bank1 <= D_in;
+						elsif A=x"BFFF" then
+							pak4_reg2 <= D_in;
+							bank2 <= std_logic_vector(
+								("00" & unsigned(pak4_reg0(5 downto 4)) & "0000") +
+								unsigned(D_in));
+						end if;
+					end if;
+				elsif use_zem = '1' and bootloader_n = '1' then
+					-- Zemina/Nemesis register map (verified against working nemesis-mapper branch):
+					-- $0000 -> bank2 ($8000-$9FFF), $0001 -> bank3 ($A000-$BFFF)
+					-- $0002 -> bank0 ($4000-$5FFF), $0003 -> bank1 ($6000-$7FFF)
+					-- $0000-$1FFF is nem_bank0 (fixed at reset); $2000-$3FFF is always page 1.
+					-- Suppressed while BIOS is running (bootloader_n='0') so the BIOS can
+					-- bank-switch its own pages via the standard Sega mapper ($FFFC-$FFFF).
 					if WR_n='0' and A(15 downto 2)="00000000000000" then
 						case A(1 downto 0) is
 							when "00" => bank2 <= D_in;
 							when "01" => bank3 <= D_in;
 							when "10" => bank0 <= D_in;
-							when "11" => bank1 <= D_in ; 
+							when "11" => bank1 <= D_in;
 						end case;
 					end if ;
+				elsif bootloader_n = '1' and WR_n='0' and MREQ_n='0' and A=x"3FFE" then
+					-- 4-PAK All Action: first write to $3FFE when no mapper active
+					mapper_4pak <= '1';
+					pak4_reg0 <= D_in;
+					pak4_reg2 <= "00000000";
+					bank0 <= D_in;
+					bank1 <= "00000001"; -- will be set by first $7FFF write
+					bank2 <= std_logic_vector(
+						("00" & unsigned(D_in(5 downto 4)) & "0000") +
+						to_unsigned(0, 8)); -- reg2=0 initially
 				else
+					-- Zemina auto-detection: write to $0002 or $0003 signals 8KB Zemina banking.
+					-- Korean Zemina games write to $0002/$0003 (bank regs for $4000/$6000 slots).
+					-- Standard SMS games almost never write to these ROM-area addresses.
+					if WR_n='0' and MREQ_n='0' and bootloader_n='1' and lock_mapper_B='0' then
+						if A = x"0002" and D_in /= x"00" and D_in /= x"01" then
+							mapper_zemina_det <= '1';
+							bank0 <= D_in;
+						elsif A = x"0003" and D_in /= x"00" and D_in /= x"01" then
+							mapper_zemina_det <= '1';
+							bank1 <= D_in;
+						end if;
+					end if;
 					if WR_n='0' and A(15 downto 2)="11111111111111" then
 						mapper_codies <= '0' ;
 						case A(1 downto 0) is
@@ -920,12 +1034,19 @@ port map(
 									bank1(7) <= '0' ;
 								-- mapper_codies <= mapper_codies or D_in(7) ;
 									nvram_cme <= D_in(7) ;
-									lock_mapper_B <= '1' ;
+									-- Do not set lock during BIOS scan/hand-off. Only set lock when
+									-- cartridge mode was already active (bootloader_n_prev='1').
+									if bootloader_n = '1' and bootloader_n_prev = '1' then
+										lock_mapper_B <= '1' ;
+									end if;
 								end if ;
 							when x"8000" => 
 								if last_read_addr /= x"8000" then -- gyurco anti-ldir patch
 									bank2 <= D_in ; 
-									lock_mapper_B <= '1' ;
+									-- See comment in $4000 handler: avoid locking during BIOS scan
+									if bootloader_n = '1' and bootloader_n_prev = '1' then
+										lock_mapper_B <= '1' ;
+									end if;
 								end if;
 					-- Korean mapper (Sangokushi 3, Dodgeball King)
 							when x"A000" => 
@@ -942,8 +1063,24 @@ port map(
 		end if;
 	end process;
 
+	-- Nemesis I  (0xEE05): Zemina banking with $0000-$1FFF = last 8KB page at startup
+	mapper_nemesis_auto <= '1' when rom_crc16_run = x"EE05" else '0';
+	-- Plain Zemina (nem_bank0=0): Nemesis II (0x9136), F-1 Spirit (0x599E),
+	--   Knightmare II (0xC47B), Penguin Adventure (0x880E)
+	mapper_zemina_crc   <= '1' when (rom_crc16_run = x"9136" or
+	                                  rom_crc16_run = x"599E" or
+	                                  rom_crc16_run = x"C47B" or
+	                                  rom_crc16_run = x"880E") else '0';
+
+	-- Active for any Zemina-family mapper.
+	-- mapper_zemina_force (OSD Zemina) overrides auto-detection.
+	-- mapper_lock (OSD Sega) disables all auto-detection but NOT the force.
+	use_zem <= mapper_zemina_force
+	        or (not mapper_lock and (mapper_msx or mapper_zemina_det
+	                                 or mapper_nemesis_auto or mapper_zemina_crc));
+
 	rom_a_i(12 downto 0) <= A(12 downto 0);
-	process (A,bank0,bank1,bank2,bank3,mapper_msx,mapper_codies,systeme,sc3000_en,sc_multicart_en,sc_multicart_page,rom_bank)
+	process (A,bank0,bank1,bank2,bank3,use_zem,nem_bank0,mapper_4pak,mapper_codies,systeme,sc3000_en,sc_multicart_en,sc_multicart_page,rom_bank,bootloader_n)
 	begin
 		if systeme = '1' then
 			case A(15 downto 14) is
@@ -960,8 +1097,17 @@ port map(
 			-- Keep the full CPU address so 32K BASIC/Music carts don't mirror every 16K.
 			rom_a_i(21 downto 16) <= (others=>'0');
 			rom_a_i(15 downto 13) <= A(15 downto 13);
-		elsif mapper_msx = '1' then
+		-- Zemina/Nemesis mapper is suppressed while the BIOS is running (bootloader_n='0').
+		-- This allows large banked BIOSes (e.g. Korean 64KB) to bank-switch their own
+		-- pages via the standard Sega mapper, without nem_bank0 corrupting $0000-$1FFF.
+		elsif use_zem = '1' and bootloader_n = '1' then
 			case A(15 downto 13) is
+			when "000" =>
+				-- $0000-$1FFF: fixed (Nemesis: last 8KB page; Zemina/MSX: page 0)
+				rom_a_i(21 downto 13) <= '0' & nem_bank0;
+			when "001" =>
+				-- $2000-$3FFF: always page 1 (never remapped in Zemina/Nemesis)
+				rom_a_i(21 downto 13) <= "000000001";
 			when "010" =>	
 				rom_a_i(21 downto 13) <= '0' & bank0;
 			when "011" =>
@@ -972,6 +1118,17 @@ port map(
 				rom_a_i(21 downto 13) <= '0' & bank3;
 			when others =>
 				rom_a_i(21 downto 13) <= "000000" & A(15 downto 13);
+			end case;
+		elsif mapper_4pak = '1' then
+			-- 4-PAK All Action: full 16KB banking for all three slots.
+			-- NO "first 1KB always from bank 0" exception here: the sub-games
+			-- have their own interrupt vectors (NMI at $0066, IM1 at $0038) in
+			-- their first bank (bank_base), NOT in physical bank 0 (the menu).
+			rom_a_i(13) <= A(13);
+			case A(15 downto 14) is
+			when "00"   => rom_a_i(21 downto 14) <= bank0;
+			when "01"   => rom_a_i(21 downto 14) <= bank1;
+			when others => rom_a_i(21 downto 14) <= bank2;
 			end case;
 		else
 			rom_a_i(13) <= A(13);
@@ -991,6 +1148,33 @@ port map(
 				rom_a_i(21 downto 14) <= bank2;
 
 			end case;
+		end if;
+	end process;
+
+	-- -----------------------------------------------------------------------
+	-- Nemesis CRC16-CCITT accumulator (runs on ROM download clock)
+	-- Resets to 0xFFFF at each 8KB boundary; after load, holds CRC of last 8KB.
+	-- Also tracks ROM size in 8KB pages from the highest address written.
+	-- -----------------------------------------------------------------------
+	process (ROMCL)
+	begin
+		if rising_edge(ROMCL) then
+			if ROMEN = '1' then
+				-- Reset page size counter on address 0 (start of new ROM)
+				if unsigned(ROMAD) = 0 then
+					rom_size_pages <= (others => '0');
+				end if;
+				if ROMAD(12 downto 0) = "0000000000000" then
+					-- Start of a new 8KB block: restart CRC with this byte
+					rom_crc16_run <= crc16_ccitt_byte(x"FFFF", ROMDT);
+				else
+					rom_crc16_run <= crc16_ccitt_byte(rom_crc16_run, ROMDT);
+				end if;
+				-- Track highest 8KB page index seen (= number of pages - 1)
+				if (unsigned(ROMAD(20 downto 13)) + 1) > unsigned(rom_size_pages) then
+					rom_size_pages <= std_logic_vector(unsigned(ROMAD(20 downto 13)) + 1);
+				end if;
+			end if;
 		end if;
 	end process;
 

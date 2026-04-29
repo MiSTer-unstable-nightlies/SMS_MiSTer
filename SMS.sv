@@ -277,7 +277,7 @@ parameter CONF_STR = {
 	"H8OA,Region,US/EU,Japan;",
 	"H8oBC,BIOS,Disable,Internal,Ext. File;",
 	"H8FS3,BINSMS,Load Ext. BIOS;",
-	"H8OF,Disable Mapper,No,Yes;",
+	"H8oDE,Mapper,Auto,Sega,Zemina;",
 	"H8o8,Z80 Speed,Normal,Turbo;",
 	"H8-;",
 	"H7o12,VDPs,Both,2,1,None;",
@@ -934,7 +934,8 @@ system #(63) system
 	.ysj_quirk(ysj_quirk),
 	.pal(pal),
 	.region(status[10]),
-	.mapper_lock(status[15] && ~systeme),
+	.mapper_lock((status[46:45] == 2'b01) && ~systeme),
+	.mapper_zemina_force(status[46:45] == 2'b10),
 	.vdp_enables(dbg_menu ? status[34:33] : 2'b00),
 	.psg_enables(dbg_menu ? status[36:35] : 2'b00),
 
@@ -961,7 +962,7 @@ system #(63) system
 	.ROMCL(clk_sys),
 	.ROMAD(ioctl_addr),
 	.ROMDT(ioctl_dout),
-	.ROMEN(ioctl_wr & ioctl_index==0),
+	.ROMEN(ioctl_wr & (ioctl_index[4:0]==1)),
 	.BIOSWEN(ioctl_wr & (ioctl_index[4:0]==3))
 );
 
