@@ -135,7 +135,37 @@ entity system is
 		ROMAD  : IN STD_LOGIC_VECTOR(24 downto 0);
 		ROMDT  : IN STD_LOGIC_VECTOR(7 downto 0);
 		ROMEN  : IN  STD_LOGIC;
-		BIOSWEN: IN  STD_LOGIC
+		BIOSWEN: IN  STD_LOGIC;
+
+		-- Save-state interface
+		z80_reg_out  : out STD_LOGIC_VECTOR(211 downto 0);
+		z80_dir      : in  STD_LOGIC_VECTOR(211 downto 0) := (others => '0');
+		z80_set      : in  STD_LOGIC := '0';
+		vdp_regs_out : out STD_LOGIC_VECTOR(127 downto 0);
+		vdp_regs_in  : in  STD_LOGIC_VECTOR(127 downto 0) := (others => '0');
+		vdp_regs_set : in  STD_LOGIC := '0';
+		vdp_cram_out : out STD_LOGIC_VECTOR(383 downto 0);
+		ss_cram_wr   : in  STD_LOGIC := '0';
+		ss_cram_A    : in  STD_LOGIC_VECTOR(4 downto 0)  := (others => '0');
+		ss_cram_D    : in  STD_LOGIC_VECTOR(11 downto 0) := (others => '0');
+		ss_vram_en   : in  STD_LOGIC := '0';
+		ss_vram_A    : in  STD_LOGIC_VECTOR(14 downto 0) := (others => '0');
+		ss_vram_D    : out STD_LOGIC_VECTOR(7 downto 0);
+		ss_vram_WE   : in  STD_LOGIC := '0';
+		ss_vram_WA   : in  STD_LOGIC_VECTOR(14 downto 0) := (others => '0');
+		ss_vram_WD   : in  STD_LOGIC_VECTOR(7 downto 0)  := (others => '0');
+		psg_out      : out STD_LOGIC_VECTOR(55 downto 0);
+		psg_in       : in  STD_LOGIC_VECTOR(55 downto 0) := (others => '0');
+		psg_set      : in  STD_LOGIC := '0';
+		mapper_out   : out STD_LOGIC_VECTOR(63 downto 0);
+		mapper_in    : in  STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
+		mapper_set   : in  STD_LOGIC := '0';
+		-- Z80 instruction boundary detection (M1 cycle = opcode fetch)
+		z80_m1_n     : out STD_LOGIC;
+		-- MREQ_n: low = normal opcode fetch, high = interrupt acknowledge
+		z80_mreq_n   : out STD_LOGIC;
+		-- ISet: "00" = no prefix active (clean instruction boundary)
+		z80_iset     : out STD_LOGIC_VECTOR(1 downto 0)
 	);
 end system;
 
@@ -147,6 +177,7 @@ architecture Behavioral of system is
 	signal IORQ_n:				std_logic;
 	signal M1_n:				std_logic;
 	signal MREQ_n:				std_logic;
+	signal z80_iset_int:		std_logic_vector(1 downto 0);
 	signal A:					std_logic_vector(15 downto 0);
 	signal D_in:				std_logic_vector(7 downto 0);
 	signal D_out:				std_logic_vector(7 downto 0);
@@ -274,10 +305,9 @@ architecture Behavioral of system is
 	-- Zemina:    8KB banking via writes to $0000-$0003; $0000-$1FFF starts from page 0.
 	-- Nemesis I: same as Zemina but $0000-$1FFF initially reads from the LAST 8KB page.
 	-- Nemesis II+/plain Zemina: $0000-$1FFF starts from page 0.
-	-- Heuristic split uses early Zemina writes plus ROM edge-byte signature.
-	signal mapper_zemina_det  : std_logic := '0';  -- auto-detected by write to $0002/$0003
+	-- Auto-detection is restricted to CRC/header signatures.
 	signal nem_bank0          : std_logic_vector(7 downto 0) := "00000000";  -- $0000-$1FFF bank
-	signal auto_nemesis1_boot : std_logic;
+	signal mapper_nemesis_auto: std_logic;  -- Nemesis I special boot page by CRC
 	signal use_zem            : std_logic;  -- active for any Zemina-family mapper
 	signal rom_size_pages     : std_logic_vector(7 downto 0)  := (others => '0');
 	-- CRC16-CCITT (poly 0x1021, init 0xFFFF) of last 8KB block, accumulated during ROM load.
@@ -285,12 +315,8 @@ architecture Behavioral of system is
 	-- bytes) but uses Codemasters-style banking -- the CRC is needed because the MSX detector
 	-- fires on the first two ROM reads, before any write-based heuristic can fire.
 	signal rom_crc16_run      : std_logic_vector(15 downto 0) := x"FFFF";
-	-- CRC-based identity for F-1 Spirit (Korea), which uses Zemina 8KB banking
-	-- but writes ONLY $0000 (the $8000-$9FFF bank register) and never $0001/$0002/$0003.
-	-- Write-based detection never fires for it, so CRC (of last 8KB block: 0x599E)
-	-- is the only reliable way to activate Zemina mode before the first $4000-$5FFF access.
-	-- Other Zemina games (Nemesis 2, Knightmare II, Penguin Adventure) write $0002/$0003
-	-- and are caught by the write-based heuristic; no CRC needed for them.
+	-- CRC-based plain-Zemina identities:
+	-- Nemesis II (0x9136), F-1 Spirit (0x599E), Knightmare II (0xC47B), Penguin Adventure (0x880E).
 	signal mapper_zemina_crc  : std_logic;
 
 	-- Heuristic detection signals
@@ -299,20 +325,14 @@ architecture Behavioral of system is
 	signal detect_linear       : std_logic := '0';
 	signal detect_wonderkid    : std_logic := '0';
 	signal detect_sega_locked  : std_logic := '0';
-	signal detect_4pak         : std_logic := '0';
-	signal detect_nemesis1     : std_logic := '0';
-	signal detect_nemesis2     : std_logic := '0';
-	signal wonderkid_write_seen: std_logic := '0';
 	signal wonderkid_write_count: integer range 0 to 3 := 0;
 	signal castle_write_count  : integer range 0 to 15 := 0;
 	signal bank_write_seen     : std_logic := '0';
 	signal sega_mapper_write_seen : std_logic := '0';
 	signal mapper_detect_ticks : unsigned(15 downto 0) := (others => '0'); -- detection window timer (16-bit: ~1.2ms at 53.6MHz, needed for external BIOS handoff)
-	-- Simple ROM-edge signature captured during download, used by Nemesis heuristics.
+	-- Simple page-0 signature captured during download, used by Wonder Kid heuristic guards.
 	signal rom_page0_byte0     : std_logic_vector(7 downto 0) := x"FF";
 	signal rom_page0_byte1     : std_logic_vector(7 downto 0) := x"FF";
-	signal rom_last_byte0      : std_logic_vector(7 downto 0) := x"FF";
-	signal rom_last_page_idx   : unsigned(7 downto 0) := (others => '0');
 	signal mapper_manual_force  : std_logic;
 	signal mapper_castle        : std_logic := '0'; -- The Castle (Japan): 32KB RAM at 0x8000-0xFFFF
 	signal mapper_wonderkid     : std_logic;         -- Wonder Kid [Proto]: Codemasters-style 16KB, all banks init 0
@@ -435,7 +455,11 @@ begin
 		WR_n		=> WR_n,
 		A			=> A,
 		DI			=> GENIE_DI,
-		DO			=> D_in
+		DO			=> D_in,
+		REG    => z80_reg_out,
+		DIRSet => z80_set,
+		DIR    => z80_dir,
+		ISet_out => z80_iset_int
 	);
 
 	vdp_inst: entity work.vdp
@@ -473,7 +497,20 @@ begin
 		ysj_quirk	=> ysj_quirk,
 		mask_column => mask_column,
 		black_column => black_column,
-		reset_n  => RESET_n
+		reset_n  => RESET_n,
+		ss_regs_out => vdp_regs_out,
+		ss_regs_in  => vdp_regs_in,
+		ss_regs_set => vdp_regs_set,
+		ss_cram_out => vdp_cram_out,
+		ss_cram_wr  => ss_cram_wr,
+		ss_cram_A   => ss_cram_A,
+		ss_cram_D   => ss_cram_D,
+		ss_vram_en  => ss_vram_en,
+		ss_vram_A   => ss_vram_A,
+		ss_vram_D   => ss_vram_D,
+		ss_vram_WE  => ss_vram_WE,
+		ss_vram_WA  => ss_vram_WA,
+		ss_vram_WD  => ss_vram_WD
 	);
 
 	vdp2_inst: entity work.vdp
@@ -526,7 +563,10 @@ begin
 		soundL	=> PSG_outL,
 		soundR	=> PSG_outR,
 
-		rst		=> not RESET_n
+		rst		=> not RESET_n,
+		ss_out => psg_out,
+		ss_set => psg_set,
+		ss_in  => psg_in
 	);
 	
 	psg2_inst: jt89
@@ -679,6 +719,9 @@ port map(
 	
 	ce_z80 <= ce_pix when (systeme = '1' or turbo='1') else ce_cpu;
 	io_cycle <= '1' when IORQ_n='0' and M1_n='1' else '0';
+	z80_m1_n   <= M1_n;
+	z80_mreq_n <= MREQ_n;
+	z80_iset   <= z80_iset_int;
 	io_upper_port <= '1' when A(7 downto 6)="11" else '0';
 	io_sms_port <= '1' when A(7 downto 6)="00" and (A(0)='1' or (gg='1' and A(5 downto 3)="000")) else '0';
 	io_gg_port <= '1' when gg='1' and A(7 downto 3)="00000" and A(2 downto 1)/="11" else '0';
@@ -826,6 +869,12 @@ port map(
 		if rising_edge(clk_sys) then
 			if RESET_n='0' then 
 				bootloader_n <= not bios_en;
+			elsif mapper_set='1' then
+				-- Save-state restore: recover exact bootloader_n captured at save time.
+				-- Without this, restoring a cart game saved while BIOS was active but
+				-- disabled (bootloader_n=1) would leave bootloader_n=0 (reset default)
+				-- so the Z80 would read BIOS ROM instead of cart ROM → instant crash.
+				bootloader_n <= mapper_in(54);
 			elsif ctl_WR_n='0' then
 				if ext_bios_sel='1' and ext_bios_loaded='1' then
 					-- For external BIOS: honour port $3E bit 3 (active low BIOS enable)
@@ -972,7 +1021,6 @@ port map(
 			mapper_4pak <= '0' ;
 			pak4_reg0 <= "00000000" ;
 			pak4_reg2 <= "00000000" ;
-			mapper_zemina_det <= '0' ;
 			nem_bank0 <= (others => '0');
 			mapper_wonderkid_prev <= '0';
 			reset_n_prev <= '0';
@@ -980,11 +1028,27 @@ port map(
 
 		else
 			if rising_edge(clk_sys) then
+				if mapper_set = '1' then
+					bank0              <= mapper_in(7 downto 0);
+					bank1              <= mapper_in(15 downto 8);
+					bank2              <= mapper_in(23 downto 16);
+					bank3              <= mapper_in(31 downto 24);
+					pak4_reg0          <= mapper_in(7 downto 0);
+					pak4_reg2          <= mapper_in(39 downto 32);
+					nem_bank0          <= mapper_in(47 downto 40);
+					nvram_e            <= mapper_in(50);
+					nvram_ex           <= mapper_in(51);
+					nvram_p            <= mapper_in(52);
+					nvram_cme          <= mapper_in(53);
+					mapper_4pak        <= mapper_in(57);
+					mapper_codies      <= mapper_in(58);
+					lock_mapper_B      <= mapper_in(59);
+					mapper_codies_lock <= mapper_in(60);
+				else
 				if bootloader_n = '0' and mapper_manual_force = '0' then
 					lock_mapper_B <= '0';
 					mapper_codies <= '0';
 					mapper_codies_lock <= '0';
-					mapper_zemina_det <= '0';
 				end if;
 				-- BIOS handoff: restore standard cartridge startup banks.
 				-- BIOS bank writes can leave bank0/1/2 in non-default states, which
@@ -1005,19 +1069,18 @@ port map(
 					end if;
 				end if;
 				-- On the first clock after RESET_n rises, initialise mapper state.
-				-- rom_size_pages / rom_page0_byte0 / rom_last_byte0 are stable here because
+				-- rom_size_pages is stable here because
 				-- cart_download holds RESET_n low throughout the entire ROM transfer.
 				if RESET_n = '1' and reset_n_prev = '0' then
 					if mapper_zemina_force = '1' then
 						nem_bank0 <= (others => '0');
-					elsif auto_nemesis1_boot = '1' then
-						-- ROM page 0 is blank (all $FF) but the last page carries code
-						-- → strong Nemesis I signature. Pre-activate the Zemina mapper
-						-- and point nem_bank0 at the last page so the CPU's first fetch
-						-- ($0000) reaches the game's actual entry code instead of $FF.
-						mapper_zemina_det <= '1';
-						nem_bank0 <= std_logic_vector(rom_last_page_idx);
-					elsif mapper_wonderkid = '1' then
+					elsif mapper_nemesis_auto = '1' and unsigned(rom_size_pages) /= 0 then
+						-- Nemesis I needs $0000-$1FFF mapped to the last 8KB page on boot.
+						nem_bank0 <= std_logic_vector(unsigned(rom_size_pages) - 1);
+					else
+						nem_bank0 <= (others => '0');
+					end if;
+					if mapper_wonderkid = '1' then
 						-- All slots start at page 0; pre-lock to prevent 4-PAK misdetection
 						bank1         <= "00000000";
 						bank2         <= "00000000";
@@ -1088,29 +1151,8 @@ port map(
 						("00" & unsigned(D_in(5 downto 4)) & "0000") +
 						to_unsigned(0, 8)); -- reg2=0 initially
 				else
-					-- Zemina auto-detection: writes to $0001-$0003 indicate 8KB banking.
-					-- $0000 is deliberately excluded: Codemasters games write to $0000
-					-- (their bank0 register) before writing $4000/$8000, so a $0000 write
-					-- with lock_mapper_B='0' is ambiguous. Detection via $0001/$0002/$0003
-					-- is sufficient -- real Zemina games always bank-switch those slots.
-					-- Once Zemina is confirmed, subsequent $0000 writes update bank2.
-					if WR_n='0' and MREQ_n='0' and bootloader_n='1' and lock_mapper_B='0' then
-						if A = x"0000" then
-							-- Don't trigger detection here; only update bank2 if already confirmed.
-							if mapper_zemina_det = '1' then
-								bank2 <= D_in;
-							end if;
-						elsif A = x"0001" then
-							mapper_zemina_det <= '1';
-							bank3 <= D_in;
-						elsif A = x"0002" then
-							mapper_zemina_det <= '1';
-							bank0 <= D_in;
-						elsif A = x"0003" then
-							mapper_zemina_det <= '1';
-							bank1 <= D_in;
-						end if;
-					end if;
+					-- No write-triggered Zemina detection here.
+					-- Zemina mode is selected by header/CRC/OSD; once active, writes are handled in the use_zem branch above.
 					if WR_n='0' and A(15 downto 2)="11111111111111" then
 						-- A write to $FFFC-$FFFF is a Sega mapper register; disable Codemasters
 						-- detection unless it was already confirmed (mapper_codies_lock='1') or forced.
@@ -1174,6 +1216,7 @@ port map(
 						end case ;
 					end if;
 				end if;
+				end if; -- mapper_set
 			end if;
 		end if;
 	end process;
@@ -1196,14 +1239,18 @@ port map(
 	-- fallback for ROM dumps where the CRC differs.
 	-- CRC16-CCITT of last 8KB block: 0x8613
 
-	-- F-1 Spirit (Korea) is a plain-Zemina game that must be activated by CRC
-	-- because it only writes $0000 and never $0001/$0002/$0003. Its startup
-	-- code accesses $4000-$5FFF before any write-based heuristic can fire, so
-	-- Zemina 8KB banking must be selected from the first CPU clock to avoid
-	-- incorrect Sega-mode banking. Other Zemina-family games remain detected by
-	-- write-based heuristics when possible; CRC is used only for this known case.
+	-- Nemesis I requires a special startup mapping: $0000-$1FFF from the last page.
+	mapper_nemesis_auto <= '1' when mapper_manual_force = '0' and
+	                                rom_crc16_run = x"EE05" else
+	                       '0';
+
+	-- Plain Zemina CRCs (page-0 boot):
+	-- 9136 Nemesis II, 599E F-1 Spirit, C47B Knightmare II, 880E Penguin Adventure.
 	mapper_zemina_crc <= '1' when mapper_manual_force = '0' and
-	                              rom_crc16_run = x"599E" else  -- F-1 Spirit (Korea): writes only $0000
+	                              (rom_crc16_run = x"9136" or
+	                               rom_crc16_run = x"599E" or
+	                               rom_crc16_run = x"C47B" or
+	                               rom_crc16_run = x"880E") else
 	                     '0';
 
 	mapper_wonderkid <= '1' when mapper_manual_force = '0' and
@@ -1241,17 +1288,19 @@ port map(
 	                  '1' when mapper_manual_force = '0' and detect_dahjee_a = '1' else
 	                  '0';
 
-	-- 4-PAK auto-detection is now write-based only ($3FFE first-write pattern).
-	-- auto_nemesis1_boot: accept either the "FF/FF + last != FF" signature or
-	-- the Korea Nemesis signature observed in some dumps (page0 == 00/00 and last page first byte = 0xF3).
-	auto_nemesis1_boot <= '1' when mapper_manual_force = '0' and bank_write_seen = '0' and unsigned(rom_size_pages) >= 8 and
-	                            ((rom_page0_byte0 = x"FF" and rom_page0_byte1 = x"FF" and rom_last_byte0 /= x"FF") or
-								 (rom_page0_byte0 = x"00" and rom_page0_byte1 = x"00" and rom_last_byte0 = x"F3")) else
-	                      '0';
+	-- 4-PAK auto-detection is write-based only ($3FFE first-write pattern).
 
-	-- Nemesis I/II split is heuristic-only.
-	-- detect_nemesis1: Zemina writes + page0 appears blank while last page has code.
-	-- detect_nemesis2: Zemina writes + no Nemesis I confidence.
+	-- Save-state: pack all mapper state into one 64-bit word.
+	-- [63]detect_linear [62]detect_wonderkid [61]detect_castle [60]mapper_codies_lock
+	-- [59]lock_mapper_B [58]mapper_codies [57]mapper_4pak [56]spare
+	-- [55]spare [54]bootloader_n [53]nvram_cme [52]nvram_p [51]nvram_ex [50]nvram_e
+	-- [49]detect_sega_locked [48]detect_dahjee_a [47:40]nem_bank0 [39:32]pak4_reg2
+	-- [31:24]bank3 [23:16]bank2 [15:8]bank1 [7:0]bank0
+	mapper_out <= detect_linear & detect_wonderkid & detect_castle & mapper_codies_lock &
+	              lock_mapper_B & mapper_codies & mapper_4pak & '0' &
+	              '0' & bootloader_n & nvram_cme & nvram_p & nvram_ex & nvram_e &
+	              detect_sega_locked & detect_dahjee_a &
+	              nem_bank0 & pak4_reg2 & bank3 & bank2 & bank1 & bank0;
 
 	-- Active for any Zemina-family mapper.
 	-- mapper_zemina_force (OSD): user explicitly selected Zemina mapper.
@@ -1259,13 +1308,11 @@ port map(
 	use_zem <= '1' when mapper_zemina_force = '1' else
 	           '0' when mapper_manual_force = '1' else
 	           '0' when mapper_wonderkid = '1' else  -- $8000 writes are incompatible with Zemina/MSX
-	           '1' when (mapper_msx = '1' or mapper_zemina_det = '1' or mapper_zemina_crc = '1' or
-	                    auto_nemesis1_boot = '1' or
-	                    detect_nemesis1 = '1' or detect_nemesis2 = '1') else
+	           '1' when (mapper_msx = '1' or mapper_nemesis_auto = '1' or mapper_zemina_crc = '1') else
 	           '0';
 
 	rom_a_i(12 downto 0) <= A(12 downto 0);
-	process (A,bank0,bank1,bank2,bank3,use_zem,nem_bank0,mapper_4pak,mapper_codies,systeme,sc3000_en,sc_multicart_en,sc_multicart_page,rom_bank,bootloader_n,mapper_linear,mapper_dahjee_a,auto_nemesis1_boot,rom_last_page_idx,detect_nemesis1)
+	process (A,bank0,bank1,bank2,bank3,use_zem,nem_bank0,mapper_4pak,mapper_codies,systeme,sc3000_en,sc_multicart_en,sc_multicart_page,rom_bank,bootloader_n,mapper_linear,mapper_dahjee_a)
 	begin
 		if systeme = '1' then
 			case A(15 downto 14) is
@@ -1288,12 +1335,8 @@ port map(
 		elsif use_zem = '1' and bootloader_n = '1' then
 			case A(15 downto 13) is
 			when "000" =>
-				-- $0000-$1FFF: fixed (Nemesis: last 8KB page; Zemina/MSX: page 0)
-				if detect_nemesis1 = '1' or auto_nemesis1_boot = '1' then
-					rom_a_i(21 downto 13) <= '0' & std_logic_vector(rom_last_page_idx);
-				else
-					rom_a_i(21 downto 13) <= '0' & nem_bank0;
-				end if;
+				-- $0000-$1FFF: fixed page (Nemesis I uses last page via nem_bank0).
+				rom_a_i(21 downto 13) <= '0' & nem_bank0;
 			when "001" =>
 				-- $2000-$3FFF: always page 1 (never remapped in Zemina/Nemesis)
 				rom_a_i(21 downto 13) <= "000000001";
@@ -1353,12 +1396,14 @@ port map(
 				detect_linear <= '0';
 				detect_wonderkid <= '0';
 				detect_sega_locked <= '0';
-				detect_4pak <= '0';
-				detect_nemesis1 <= '0';
-				detect_nemesis2 <= '0';
-				wonderkid_write_seen <= '0';
 				wonderkid_write_count <= 0;
 				sega_mapper_write_seen <= '0';
+			elsif mapper_set = '1' then
+				detect_castle      <= mapper_in(61);
+				detect_wonderkid   <= mapper_in(62);
+				detect_linear      <= mapper_in(63);
+				detect_dahjee_a    <= mapper_in(48);
+				detect_sega_locked <= mapper_in(49);
 			else
 				if bootloader_n = '0' then
 					mapper_detect_ticks <= (others => '0');
@@ -1369,10 +1414,6 @@ port map(
 					detect_linear <= '0';
 					detect_wonderkid <= '0';
 					detect_sega_locked <= '0';
-					detect_4pak <= '0';
-					detect_nemesis1 <= '0';
-					detect_nemesis2 <= '0';
-					wonderkid_write_seen <= '0';
 					wonderkid_write_count <= 0;
 					sega_mapper_write_seen <= '0';
 				-- run a limited detection window while bootloader is active
@@ -1382,28 +1423,14 @@ port map(
 
 				if bootloader_n = '1' and mapper_manual_force = '0' and mapper_detect_ticks < to_unsigned(65535, mapper_detect_ticks'length) then
 					if WR_n = '0' and MREQ_n = '0' then
-						-- 4-PAK register write pattern.
-						if A = x"3FFE" then
-							detect_4pak <= '1';
-						end if;
-
-						-- Wonder Kid [Proto]: keep the first $8000 write as a candidate,
-						-- then confirm it after the MSX header probe has finished.
-						if A = x"8000" and mapper_zemina_det = '0' and mapper_4pak = '0' and mapper_codies = '0' and detect_castle = '0' and detect_dahjee_a = '0' and sega_mapper_write_seen = '0' then
-							-- require two candidate writes to $8000 within detection window to avoid spurious single-write cases
+						-- Wonder Kid [Proto]: confirm after two $8000 writes during the detection window.
+						if A = x"8000" and mapper_4pak = '0' and mapper_codies = '0' and detect_castle = '0' and detect_dahjee_a = '0' and sega_mapper_write_seen = '0' then
 							if wonderkid_write_count < 2 then
 								wonderkid_write_count <= wonderkid_write_count + 1;
 							end if;
-							-- if previous count was 1, this is the second write -> mark seen
 							if wonderkid_write_count = 1 then
-								wonderkid_write_seen <= '1';
-								-- Immediately promote to detected if no stronger signatures present.
-								-- A write to $8000 is incompatible with the MSX/Zemina mapper
-								-- (which uses $0000-$0003), so mapper_msx is ignored here:
-								-- any ROM that writes to $8000 is definitely not MSX.
-								if mapper_manual_force = '0' and sega_mapper_write_seen = '0' and 
-								   rom_page0_byte0 = x"41" and rom_page0_byte1 = x"42" and
-								   mapper_zemina_det = '0' and detect_4pak = '0' and mapper_codies = '0' and detect_castle = '0' and detect_dahjee_a = '0' then
+								-- $8000 writes rule out MSX/Zemina register maps; require 0x41/0x42 header too.
+								if rom_page0_byte0 = x"41" and rom_page0_byte1 = x"42" then
 									detect_wonderkid <= '1';
 								end if;
 							end if;
@@ -1413,7 +1440,7 @@ port map(
 						-- Excludes common mapper registers to avoid false positives on Sega games.
 						if A(15 downto 14) = "10" and
 						   A /= x"8000" and A /= x"A000" and A /= x"BFFF" and A /= x"9FFF" and
-						   bank_write_seen = '0' and mapper_zemina_det = '0' and mapper_msx = '0' and mapper_4pak = '0' and mapper_codies = '0' then
+						   bank_write_seen = '0' and mapper_msx = '0' and mapper_4pak = '0' and mapper_codies = '0' then
 							if castle_write_count < 15 then
 								castle_write_count <= castle_write_count + 1;
 							end if;
@@ -1435,12 +1462,6 @@ port map(
 					end if;
 				end if;
 
-				if bootloader_n = '1' and mapper_manual_force = '0' and wonderkid_write_seen = '1' and sega_mapper_write_seen = '0' and 
-				   rom_page0_byte0 = x"41" and rom_page0_byte1 = x"42" and
-				   mapper_zemina_det = '0' and detect_4pak = '0' and mapper_codies = '0' and detect_castle = '0' and detect_dahjee_a = '0' then
-					detect_wonderkid <= '1';
-				end if;
-
 				-- Dahjee Type A: watch for writes to $2000-$3FFF at any point during boot.
 				-- $2000-$3FFF is ROM space; standard Sega games never write here.
 				-- $3FFE is the 4-PAK reg0 address and is explicitly excluded.
@@ -1452,15 +1473,6 @@ port map(
 
 				-- after detection window:
 				if mapper_manual_force = '0' and mapper_detect_ticks = to_unsigned(65534, mapper_detect_ticks'length) then
-					-- Nemesis split heuristic inside Zemina-family writes.
-					if mapper_zemina_det = '1' then
-						if rom_page0_byte0 = x"FF" and rom_page0_byte1 = x"FF" and rom_last_byte0 /= x"FF" then
-							detect_nemesis1 <= '1';
-						else
-							detect_nemesis2 <= '1';
-						end if;
-					end if;
-
 					-- 32KB pure-linear ROMs -> mapper_linear
 					if unsigned(rom_size_pages) = 4 and bank_write_seen = '0' then
 						detect_linear <= '1';
@@ -1480,8 +1492,7 @@ port map(
 
 	-- -----------------------------------------------------------------------
 	-- ROM metadata capture (runs on ROM download clock)
-	-- Tracks ROM size in 8KB pages and captures edge-byte signatures used
-	-- by Nemesis I/II heuristic split.
+	-- Tracks ROM size in 8KB pages and captures the page-0 signature bytes.
 	-- -----------------------------------------------------------------------
 	process (ROMCL)
 	begin
@@ -1490,10 +1501,8 @@ port map(
 				-- Reset page size counter on address 0 (start of new ROM)
 				if unsigned(ROMAD) = 0 then
 					rom_size_pages <= (others => '0');
-					rom_last_page_idx <= (others => '0');
 					rom_page0_byte0 <= x"FF";
 					rom_page0_byte1 <= x"FF";
-					rom_last_byte0 <= x"FF";
 				end if;
 
 				-- Update running CRC16-CCITT over the current (last-seen) 8KB block.
@@ -1504,14 +1513,10 @@ port map(
 				else
 					rom_crc16_run <= crc16_ccitt_byte(rom_crc16_run, ROMDT);
 				end if;
-				-- Capture first byte of page 0 and first byte of current highest page
+				-- Capture first bytes of ROM page 0.
 				if ROMAD(12 downto 0) = "0000000000000" then
 					if unsigned(ROMAD(20 downto 13)) = 0 then
 						rom_page0_byte0 <= ROMDT;
-					end if;
-					if unsigned(ROMAD(20 downto 13)) >= rom_last_page_idx then
-						rom_last_page_idx <= unsigned(ROMAD(20 downto 13));
-						rom_last_byte0 <= ROMDT;
 					end if;
 				end if;
 				if unsigned(ROMAD(20 downto 13)) = 0 and ROMAD(12 downto 0) = "0000000000001" then
