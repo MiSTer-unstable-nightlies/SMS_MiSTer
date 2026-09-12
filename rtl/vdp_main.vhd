@@ -13,7 +13,8 @@ entity vdp_main is
 		ce_pix:				in  STD_LOGIC;
 		ce_sp:				in  STD_LOGIC;
 		ggres:					in  std_logic;			
-		sp64:					in  std_logic;			
+		sp64:					in  std_logic;
+		legacy_ext_nt:	in  std_logic := '0';
 		vram_A:				out std_logic_vector(13 downto 0);
 		vram_D:				in  std_logic_vector(7 downto 0);
 		cram_A:				out std_logic_vector(4 downto 0);
@@ -122,6 +123,7 @@ begin
 		smode_M3			=> smode_M3,
 		smode_M4			=> smode_M4,
 		ysj_quirk			=> ysj_quirk,
+		legacy_ext_nt	=> legacy_ext_nt,
 		text_fg_color	=> text_fg_color,
 		overscan			=> overscan,
 		ss_restore			=> ss_regs_set,

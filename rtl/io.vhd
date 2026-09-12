@@ -76,6 +76,17 @@ entity io is
 		io_state_out: out STD_LOGIC_VECTOR(31 downto 0);
 		io_state_in:  in  STD_LOGIC_VECTOR(31 downto 0) := (others => '0');
 		io_state_set: in  STD_LOGIC := '0';
+		mapper_evolution_force: in STD_LOGIC := '0';
+		evolution_menu_io: in STD_LOGIC := '0';
+		evolution_bank61: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_bank62: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg8c: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_regcd: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg63: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg88: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg8d: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg8e: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+		evolution_reg8f: in STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
 		ss_freeze:     in  STD_LOGIC := '0';
 		RESET_n:	in  STD_LOGIC);
 end io;
@@ -452,7 +463,26 @@ begin
 	begin
 		if rising_edge(clk) then
 			if RD_n='0' then
-				if A(7)='0' then -- implies gg='1'
+				-- Confirmed Evolution registers take priority only in menu space.
+				if evolution_menu_io='1' and A=x"61" then
+					D_out <= evolution_bank61;
+				elsif evolution_menu_io='1' and A=x"62" then
+					D_out <= evolution_bank62;
+				elsif evolution_menu_io='1' and A=x"63" then
+					D_out <= evolution_reg63;
+				elsif evolution_menu_io='1' and A=x"88" then
+					D_out <= evolution_reg88;
+				elsif evolution_menu_io='1' and A=x"8C" then
+					D_out <= evolution_reg8c;
+				elsif evolution_menu_io='1' and A=x"8D" then
+					D_out <= evolution_reg8d;
+				elsif evolution_menu_io='1' and A=x"8E" then
+					D_out <= evolution_reg8e;
+				elsif evolution_menu_io='1' and A=x"8F" then
+					D_out <= evolution_reg8f;
+				elsif evolution_menu_io='1' and A=x"CD" then
+					D_out <= evolution_regcd;
+				elsif A(7)='0' then -- implies gg='1'
 					case A(2 downto 0) is
 						when "000" =>
 							D_out(7) <= Pause;

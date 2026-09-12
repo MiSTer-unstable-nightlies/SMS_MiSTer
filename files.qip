@@ -11,6 +11,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cheatcodes.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/lightgun.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/keyboard.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sega_controller.sv
 set_global_assignment -name VHDL_FILE rtl/video.vhd
 set_global_assignment -name VHDL_FILE rtl/sprom.vhd
 set_global_assignment -name VHDL_FILE rtl/spram.vhd
@@ -22,6 +23,7 @@ set_global_assignment -name VHDL_FILE rtl/vdp_cram.vhd
 set_global_assignment -name VHDL_FILE rtl/vdp_background.vhd
 set_global_assignment -name VHDL_FILE rtl/vdp.vhd
 set_global_assignment -name VHDL_FILE rtl/system.vhd
+set_global_assignment -name VHDL_FILE rtl/evolution_mapper.vhd
 set_global_assignment -name VHDL_FILE rtl/eeprom_93c46.vhd
 set_global_assignment -name MIF_FILE rtl/nvram_ff.mif
 set_global_assignment -name VHDL_FILE rtl/cart_eeprom.vhd

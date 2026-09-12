@@ -89,6 +89,13 @@ module savestates (
     output reg [63:0] mapper_in,
     output reg        mapper_set,
 
+    // ---- Master System Evolution extra mapper snapshot / restore ----
+    // Stored in otherwise-unused IO word bits and the EEPROM word. This keeps
+    // the established save/load FSM path unchanged for every other mapper.
+    input       [95:0] evolution_out,
+    output reg  [95:0] evolution_in,
+    output reg         evolution_set,
+
     // ---- EEPROM snapshot / restore ----
     input      [63:0] eeprom_out,
     output reg [63:0] eeprom_in,
@@ -256,9 +263,10 @@ localparam [27:0] OP_COOLDOWN_MAX = 28'd26846500; // ~500ms @ 53.7MHz
 localparam [19:0] FLUSH_MAX       = 20'd900000;    // ≈16.8ms @ 53.7MHz
 
 // NVRAM size calculation helpers
-wire has_nvram_8k  = mapper_snap[48] | mapper_snap[53]; // Dahjee A / Codemasters CME
-wire has_nvram_16k = mapper_snap[50];                   // Sega mapper nvram_e
-wire has_nvram_32k = mapper_snap[51] | mapper_snap[52] | mapper_snap[61]; // nvram_ex / nvram_p / The Castle
+wire evolution_state = evolution_snap[31:16] == 16'hE132;
+wire has_nvram_8k  = !evolution_state && (mapper_snap[48] | mapper_snap[53]); // Dahjee A / Codemasters CME
+wire has_nvram_16k = !evolution_state && mapper_snap[50];                    // Sega mapper nvram_e
+wire has_nvram_32k = !evolution_state && (mapper_snap[51] | mapper_snap[52] | mapper_snap[61]); // nvram_ex / nvram_p / The Castle
 wire has_nvram     = has_nvram_8k | has_nvram_16k | has_nvram_32k;
 
 wire [14:0] nvram_size_minus_1 = has_nvram_32k ? 15'd32767 :
@@ -289,6 +297,7 @@ reg [127:0] vdp_snap;
 reg [383:0] cram_snap;
 reg  [55:0] psg_snap;
 reg  [63:0] mapper_snap;
+reg  [95:0] evolution_snap;
 // System E latching buffers
 reg [127:0] vdp2_snap;
 reg [383:0] cram2_snap;
@@ -404,6 +413,8 @@ always @(posedge clk or negedge reset_n) begin
         cram_wr         <= 0;
         psg_set         <= 0;
         mapper_set      <= 0;
+        evolution_set   <= 0;
+        evolution_in    <= 96'd0;
         eeprom_set      <= 0;
         vram_en         <= 0;
         vram_WE         <= 0;
@@ -443,6 +454,7 @@ always @(posedge clk or negedge reset_n) begin
         cram_wr      <= 0;
         psg_set      <= 0;
         mapper_set   <= 0;
+        evolution_set <= 0;
         eeprom_set   <= 0;
         vram_WE      <= 0;
         wram_WE      <= 0;
@@ -522,6 +534,7 @@ always @(posedge clk or negedge reset_n) begin
             cram_snap   <= cram_out;
             psg_snap    <= psg_out;
             mapper_snap <= mapper_out;
+            evolution_snap <= evolution_out;
             if (systeme) begin
                 vdp2_snap   <= vdp2_regs;
                 cram2_snap  <= cram2_out;
@@ -566,6 +579,8 @@ always @(posedge clk or negedge reset_n) begin
             if (!DDRAM_BUSY) begin
                 mapper_in  <= mapper_snap;
                 mapper_set <= 1;
+                evolution_in  <= evolution_snap;
+                evolution_set <= 1;
                 eeprom_in  <= eeprom_snap;
                 eeprom_set <= 1;
                 // Old format only ever wrote NVRAM for Dahjee-A (mapper_snap[48]);
@@ -663,7 +678,7 @@ always @(posedge clk or negedge reset_n) begin
 
         ST_SAVE_IO: begin
             if (!DDRAM_BUSY) begin
-                ddram_write(base_addr + 29'h019, {32'd0, io_snap}, 8'hFF);
+                ddram_write(base_addr + 29'h019, {evolution_snap[31:0], io_snap}, 8'hFF);
                 state <= ST_SAVE_VIDEO;
             end
         end
@@ -677,7 +692,9 @@ always @(posedge clk or negedge reset_n) begin
 
         ST_SAVE_EEPROM: begin
             if (!DDRAM_BUSY) begin
-                ddram_write(base_addr + 29'h01b, eeprom_snap, 8'hFF);
+                ddram_write(base_addr + 29'h01b,
+                            evolution_snap[31:16] == 16'hE132 ? evolution_snap[95:32] : eeprom_snap,
+                            8'hFF);
                 if (systeme) begin
                     // System E: save VDP2/CRAM2/PSG2 before VRAM1
                     cram_idx  <= 0;
@@ -1201,6 +1218,7 @@ always @(posedge clk or negedge reset_n) begin
             end else if (!dout_expected && !DDRAM_BUSY) begin
                 mapper_snap      <= dout_latch;
                 if (is_old_format) begin
+                    evolution_snap <= 96'd0;
                     vram_load_addr   <= 0;
                     vram_byte_cnt    <= 0;
                     vram_load_active <= 0;
@@ -1220,6 +1238,7 @@ always @(posedge clk or negedge reset_n) begin
                 dout_latch    <= DDRAM_DOUT;
             end else if (!dout_expected && !DDRAM_BUSY) begin
                 io_snap          <= dout_latch[31:0];
+                evolution_snap[31:0] <= dout_latch[63:32];
                 ddram_read(base_addr + 29'h01a);
                 state            <= ST_LOAD_VIDEO;
             end
@@ -1241,7 +1260,13 @@ always @(posedge clk or negedge reset_n) begin
                 dout_expected <= 0;
                 dout_latch    <= DDRAM_DOUT;
             end else if (!dout_expected && !DDRAM_BUSY) begin
-                eeprom_snap      <= dout_latch;
+                if (evolution_snap[31:16] == 16'hE132) begin
+                    evolution_snap[95:32] <= dout_latch;
+                    eeprom_snap <= 64'd0;
+                end else begin
+                    evolution_snap[95:32] <= 64'd0;
+                    eeprom_snap <= dout_latch;
+                end
                 if (systeme) begin
                     // System E: read VDP2/CRAM2/PSG2 before restoring VRAM
                     ddram_read(base_addr + 29'h10);

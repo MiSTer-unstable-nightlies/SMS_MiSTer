@@ -39,7 +39,7 @@ entity system is
 		RESET_n:		in	 STD_LOGIC;
 
 		rom_rd:  	out STD_LOGIC;
-		rom_a:		out STD_LOGIC_VECTOR(21 downto 0);
+		rom_a:		out STD_LOGIC_VECTOR(23 downto 0);
 		rom_do:		in	 STD_LOGIC_VECTOR(7 downto 0);
 
 		j1_up:		in	 STD_LOGIC;
@@ -109,6 +109,9 @@ entity system is
 		mapper_dahjee_a_force : in STD_LOGIC;
 		mapper_linear_force : in STD_LOGIC;
 		mapper_zemina_force : in STD_LOGIC;   -- Force Zemina mapper (OSD override)
+		mapper_evolution_force : in STD_LOGIC;
+		evolution_gg_active : out STD_LOGIC;
+		evolution_active : out STD_LOGIC;
 		mapper_eeprom_out   : out STD_LOGIC;  -- Active high when EEPROM game detected
 		vdp_enables:	in STD_LOGIC_VECTOR(1 downto 0);
 		psg_enables:	in STD_LOGIC_VECTOR(1 downto 0);
@@ -166,6 +169,9 @@ entity system is
 		mapper_out   : out STD_LOGIC_VECTOR(63 downto 0);
 		mapper_in    : in  STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
 		mapper_set   : in  STD_LOGIC := '0';
+		evolution_ss_out : out STD_LOGIC_VECTOR(95 downto 0);
+		evolution_ss_in  : in  STD_LOGIC_VECTOR(95 downto 0) := (others => '0');
+		evolution_ss_set : in  STD_LOGIC := '0';
 		eeprom_ss_out : out STD_LOGIC_VECTOR(63 downto 0);
 		eeprom_ss_in  : in  STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
 		eeprom_ss_set : in  STD_LOGIC := '0';
@@ -254,7 +260,102 @@ architecture Behavioral of system is
 	signal ext_gg_bios_wren:  std_logic;
 	signal rom_a_i:         std_logic_vector(21 downto 0);
 
+	-- Master System Evolution / Noza mapper state.
+	signal evolution_bank61 : std_logic_vector(7 downto 0);
+	signal evolution_bank62 : std_logic_vector(7 downto 0);
+	signal evolution_game_bank61, evolution_game_bank62 : std_logic_vector(7 downto 0);
+	signal evolution_prev_game_bank61, evolution_prev_game_bank62 : std_logic_vector(7 downto 0);
+	signal evolution_game_select : std_logic_vector(15 downto 0);
+	signal evolution_effective_game_select : std_logic_vector(15 downto 0);
+	signal evolution_selector_page : std_logic_vector(15 downto 0);
+	signal evolution_game_page   : std_logic_vector(15 downto 0);
+	signal evolution_3ffe   : std_logic_vector(7 downto 0);
+	signal evolution_8c     : std_logic_vector(7 downto 0);
+	signal evolution_cd     : std_logic_vector(7 downto 0);
+	signal evolution_63, evolution_88 : std_logic_vector(7 downto 0);
+	signal evolution_8d, evolution_8e, evolution_8f : std_logic_vector(7 downto 0);
+	signal evolution_game_launch : std_logic;
+	signal evolution_menu_mode   : std_logic;
+	signal evolution_gg_mode     : std_logic;
+	signal effective_vdp_gg      : std_logic;
+	signal effective_gg          : std_logic;
+	signal evolution_launch_trace : std_logic_vector(63 downto 0);
+	signal evolution_launch_fetch_addr : std_logic_vector(15 downto 0);
+	signal mapper_evolution : std_logic;
+
+	-- The menu's 16-byte launch records follow the physical order of the
+	-- MS132X1E flash dump.  Using that stable record index avoids ambiguous
+	-- $61/$62 selectors, several of which are shared by two different games.
+	function evolution_record_page(
+		record_addr : std_logic_vector(15 downto 0);
+		fallback    : std_logic_vector(15 downto 0)
+	) return std_logic_vector is
+	begin
+		case record_addr is
+			when x"1FD8" => return x"0180"; when x"1FE8" => return x"01C0";
+			when x"1FF8" => return x"05C0"; when x"2008" => return x"09C0";
+			when x"2018" => return x"0DC0"; when x"2028" => return x"0FC0";
+			when x"2038" => return x"1040"; when x"2048" => return x"1440";
+			when x"2058" => return x"1640"; when x"2068" => return x"1840";
+			when x"2078" => return x"1C40"; when x"2088" => return x"2000";
+			when x"2098" => return x"2400"; when x"20A8" => return x"2800";
+			when x"20B8" => return x"2C00"; when x"20C8" => return x"2E00";
+			when x"20D8" => return x"3200"; when x"20E8" => return x"3400";
+			when x"20F8" => return x"3800"; when x"2108" => return x"3C00";
+			when x"2118" => return x"4000"; when x"2128" => return x"4200";
+			when x"2138" => return x"4600"; when x"2148" => return x"4800";
+			when x"2158" => return x"4C00"; when x"2168" => return x"4E00";
+			when x"2178" => return x"5000"; when x"2188" => return x"5200";
+			when x"2198" => return x"5600"; when x"21A8" => return x"5800";
+			when x"21B8" => return x"6000"; when x"21C8" => return x"6200";
+			when x"21D8" => return x"6400"; when x"21E8" => return x"6600";
+			when x"21F8" => return x"6A00"; when x"2208" => return x"6A80";
+			when x"2218" => return x"6E80"; when x"2228" => return x"7280";
+			when x"2238" => return x"7300"; when x"2248" => return x"7700";
+			when x"2258" => return x"7900"; when x"2268" => return x"7D00";
+			when x"2278" => return x"7F00"; when x"2288" => return x"7F80";
+			when x"2298" => return x"8000"; when x"22A8" => return x"8200";
+			when x"22B8" => return x"8400"; when x"22C8" => return x"8600";
+			when x"22D8" => return x"8A00"; when x"22E8" => return x"8E00";
+			when x"22F8" => return x"9200"; when x"2308" => return x"9600";
+			when x"2318" => return x"9800"; when x"2328" => return x"A000";
+			when x"2338" => return x"A080"; when x"2348" => return x"A480";
+			when x"2358" => return x"A880"; when x"2368" => return x"AC80";
+			when x"2378" => return x"AD00"; when x"2388" => return x"B100";
+			when x"2398" => return x"B300"; when x"23A8" => return x"B700";
+			when x"23B8" => return x"B780"; when x"23C8" => return x"B980";
+			when x"23D8" => return x"BA00"; when x"23E8" => return x"BAC0";
+			when x"23F8" => return x"BCC0"; when x"2408" => return x"BF00";
+			when x"2418" => return x"C000"; when x"2428" => return x"CF00";
+			when x"2438" => return x"CF80"; when x"2448" => return x"D080";
+			when x"2458" => return x"D140"; when x"2468" => return x"D240";
+			when x"2478" => return x"D440"; when x"2488" => return x"D540";
+			when x"2498" => return x"D640"; when x"24A8" => return x"D740";
+			when x"24B8" => return x"D880"; when x"24C8" => return x"DA00";
+			when x"24D8" => return x"DAC0"; when x"24E8" => return x"DBC0";
+			when x"24F8" => return x"DCC0"; when x"2508" => return x"DE00";
+			when x"2518" => return x"DF00"; when x"2528" => return x"E000";
+			when x"2538" => return x"E100"; when x"2548" => return x"E200";
+			when x"2558" => return x"E2C0"; when x"2568" => return x"E3C0";
+			when x"2578" => return x"E480"; when x"2588" => return x"E540";
+			when x"2598" => return x"E640"; when x"25A8" => return x"E880";
+			when x"25B8" => return x"E980"; when x"25C8" => return x"EA40";
+			-- Icepost Rescue occupies $EA4000-$EDBFFF but has only one menu
+			-- record ($25C8).  State captures show that $25D8 is Junte 4;
+			-- the old synthetic $EC4000 entry shifted every following title.
+			when x"25D8" => return x"EDC0"; when x"25E8" => return x"EE80";
+			when x"25F8" => return x"EF80"; when x"2608" => return x"F0C0";
+			when x"2618" => return x"F180"; when x"2628" => return x"F2C0";
+			when x"2638" => return x"F3C0"; when x"2648" => return x"FBC0";
+			when x"2658" => return x"FBC0";
+			when others  => return fallback;
+		end case;
+	end function;
+
 	signal bootloader_n:	std_logic := '0';
+	signal media_control:   std_logic_vector(7 downto 5) := "101";
+	signal cart_precedence: std_logic;
+	signal io_state_out_i:  std_logic_vector(31 downto 0);
 	signal active_bios:     std_logic;
 	signal irom_D_out:		std_logic_vector(7 downto 0);
 	signal irom_RD_n:			std_logic := '1';
@@ -308,6 +409,7 @@ architecture Behavioral of system is
 	signal TH_Bin:				std_logic;
 	signal sc_multicart_page:	std_logic_vector(6 downto 0);
 	signal io_cycle:			std_logic;
+	signal evolution_io_port:	std_logic;
 	signal io_upper_port:		std_logic;
 	signal io_sms_port:			std_logic;
 	signal io_gg_port:			std_logic;
@@ -504,6 +606,55 @@ architecture Behavioral of system is
 
 begin
 
+	-- The two known 16 MiB Evolution dumps differ in only 17 bytes. Detect
+	-- their exact full-image CRCs after download; this avoids false positives
+	-- and removes the need for a user-visible mapper override.
+	mapper_evolution <= '1' when mapper_evolution_force = '1' or
+	                   ((mapper_lock or mapper_codies_force or
+	                     mapper_dahjee_a_force or mapper_linear_force or
+	                     mapper_zemina_force) = '0' and
+	                    ((rom_crc32 xor x"FFFFFFFF") = x"0C90A6CA" or
+	                     (rom_crc32 xor x"FFFFFFFF") = x"CBD7FF82")) else '0';
+	evolution_active <= mapper_evolution;
+
+	-- Master System Evolution mapper register interface.
+	-- $61/$62 select the game flash base; the observed $3FFE commands
+	-- select the selected-game view ($87) or menu view ($85).
+	evolution_mapper_inst : entity work.evolution_mapper
+	port map (
+		clk        => clk_sys,
+		reset_n    => RESET_n,
+		enable     => mapper_evolution,
+		cpu_a      => A,
+		mreq_n     => MREQ_n,
+		iorq_n     => IORQ_n,
+		rd_n       => RD_n,
+		wr_n       => WR_n,
+		d_in       => D_in,
+		m1_n       => M1_n,
+		bank61     => evolution_bank61,
+		bank62     => evolution_bank62,
+		game_bank61 => evolution_game_bank61,
+		game_bank62 => evolution_game_bank62,
+		prev_game_bank61 => evolution_prev_game_bank61,
+		prev_game_bank62 => evolution_prev_game_bank62,
+		reg3ffe    => evolution_3ffe,
+		reg8c      => evolution_8c,
+		regcd      => evolution_cd,
+		reg63      => evolution_63,
+		reg88      => evolution_88,
+		reg8d      => evolution_8d,
+		reg8e      => evolution_8e,
+		reg8f      => evolution_8f,
+		launch_trace => evolution_launch_trace,
+		launch_fetch_addr => evolution_launch_fetch_addr,
+		game_launch => evolution_game_launch,
+		ss_out      => evolution_ss_out,
+		ss_in       => evolution_ss_in,
+		ss_mapper_in=> mapper_in,
+		ss_set      => evolution_ss_set
+	);
+
 	-- Game Genie
 	GAMEGENIE : component CODES
 	generic map(
@@ -534,7 +685,7 @@ begin
 		CLK		=> clk_sys,
 		CEN		=> ce_z80,
 		INT_n		=> IRQ_n,
-		NMI_n		=> (pause or gg) and gg_link_nmi_n,
+		NMI_n		=> (pause or effective_gg) and gg_link_nmi_n,
 		MREQ_n	=> MREQ_n,
 		IORQ_n	=> IORQ_n,
 		M1_n		=> M1_n,
@@ -559,9 +710,22 @@ begin
 		ce_vdp	=> ce_vdp,
 		ce_pix	=> ce_pix,
 		ce_sp		=> ce_sp,
-		sp64		=> sp64,
+		-- Later TecToy VDP implementations used by Evolution do not enforce
+		-- the original eight-sprites-per-line display limit.  Several bundled
+		-- titles rely on this even when the global compatibility option is off.
+		sp64		=> sp64 or mapper_evolution,
 		HL			=> HL,
-		gg			=> gg,
+		-- The Evolution menu sets R10=$C0 while enabling both HINT and VINT.
+		-- This timing model otherwise delivers a line-191 IRQ and a separate
+		-- line-192 frame IRQ. The menu treats both as frame ticks and may resume
+		-- VRAM writes before VBlank. Selected games retain normal line IRQs.
+		mask_line_irq => evolution_menu_mode,
+		capture_cpu_edges => evolution_menu_mode,
+		-- Evolution's clone keeps the ordinary R2 name-table addressing
+		-- while displaying 224 lines. Its educational ROMs populate $3800;
+		-- SMS2 addressing would incorrectly render pattern data from $3700.
+		legacy_ext_nt => mapper_evolution,
+		gg			=> effective_vdp_gg,
 		ggres			=> ggres,
 		-- Bsg			=> sg,		-- sg1000
 		se_bank	=> vdp_se_bank,
@@ -614,7 +778,10 @@ begin
 		ce_sp		=> ce_sp,
 		sp64		=> sp64,
 		HL			=> HL,
-		gg			=> gg,
+		mask_line_irq => '0',
+		capture_cpu_edges => '0',
+		legacy_ext_nt => '0',
+		gg			=> effective_vdp_gg,
 		ggres			=> ggres,
 		-- Bsg			=> sg,		-- sg1000
 		se_bank	=> vdp2_se_bank,
@@ -721,11 +888,11 @@ begin
 -- AMR - Clamped volume boosting - if the top two bits match, truncate the topmost bit.
 -- If the top two bits don't match, duplicate the second bit across the output.
 
-FM_gated <= (others=>'0') when fm_ena='0' or det_D(0)='0' else  -- All zero if FM is disabled
+FM_gated <= (others=>'0') when fm_ena='0' or mapper_evolution='1' or det_D(0)='0' else  -- All zero if FM is disabled
 				FM_out(FM_out'high-1 downto 0) when FM_sign=FM_adj else -- Pass through
 				(FM_gated'high=>FM_sign,others=>FM_adj); -- Clamp
 
-PSG_disable <= '1' when (systeme='0' and gg='0' and fm_ena='1' and (not det_D(1)=det_D(0))) else '0';
+PSG_disable <= '1' when (systeme='0' and gg='0' and fm_ena='1' and mapper_evolution='0' and (not det_D(1)=det_D(0))) else '0';
 				 
 mix_inL <= (others=>'0') when psg_enables(0)='1' or PSG_disable='1' else (PSG_outL(10) & PSG_outL & '0');
 mix_inR <= (others=>'0') when psg_enables(0)='1' or PSG_disable='1' else (PSG_outR(10) & PSG_outR & '0');
@@ -814,7 +981,7 @@ port map(
 		sk1100_row_sel => sk1100_row_sel,
 		sk1100_row_data => sk1100_row_data,
 		pal		=> pal,
-		gg			=> gg,
+		gg			=> effective_gg,
 		gg_link_en => gg_link_en,
 		gg_link_in => gg_link_in,
 		gg_link_out => gg_link_out,
@@ -825,9 +992,20 @@ port map(
 		psg_enables   => psg_enables,
 		se_mapper_in  => mapper_in(7 downto 0),
 		se_mapper_set => mapper_set,
-		io_state_out  => io_state_out,
+		io_state_out  => io_state_out_i,
 		io_state_in   => io_state_in,
 		io_state_set  => io_state_set,
+		mapper_evolution_force => mapper_evolution,
+		evolution_menu_io => evolution_io_port,
+		evolution_bank61 => evolution_bank61,
+		evolution_bank62 => evolution_bank62,
+		evolution_reg8c => evolution_8c,
+		evolution_regcd => evolution_cd,
+		evolution_reg63 => evolution_63,
+		evolution_reg88 => evolution_88,
+		evolution_reg8d => evolution_8d,
+		evolution_reg8e => evolution_8e,
+		evolution_reg8f => evolution_8f,
 		ss_freeze     => ss_freeze,
 		RESET_n	=> RESET_n
 	);
@@ -835,6 +1013,16 @@ port map(
 	ce_z80 <= '0' when se_pause='1' else
 	          ce_pix when (systeme = '1' or turbo='1') else ce_cpu;
 	io_cycle <= '1' when IORQ_n='0' and M1_n='1' else '0';
+	-- Only ports demonstrated by the menu ROM and implemented by the
+	-- Evolution mapper are exclusive. $A0 remains a mirrored VDP data port.
+	-- The menu also writes $06 once to $89 as board configuration; suppress
+	-- that write at the VDP below, but do not expose an invented readable
+	-- Evolution register (the ROM never reads $89).
+	evolution_io_port <= '1' when evolution_menu_mode='1' and
+		(A(7 downto 0)=x"61" or A(7 downto 0)=x"62" or A(7 downto 0)=x"63" or
+		 A(7 downto 0)=x"88" or A(7 downto 0)=x"8C" or
+		 A(7 downto 0)=x"8D" or A(7 downto 0)=x"8E" or
+		 A(7 downto 0)=x"8F" or A(7 downto 0)=x"CD") else '0';
 	z80_m1_n   <= M1_n;
 	z80_mreq_n <= MREQ_n;
 	z80_iset   <= z80_iset_int;
@@ -844,9 +1032,9 @@ port map(
 	ss_vram2_D    <= vdp2_vram_D_i;
 	psg2_out      <= psg2_out_i;
 	io_upper_port <= '1' when A(7 downto 6)="11" else '0';
-	io_sms_port <= '1' when A(7 downto 6)="00" and (A(0)='1' or (gg='1' and A(5 downto 3)="000")) else '0';
-	io_gg_port <= '1' when gg='1' and A(7 downto 3)="00000" and A(2 downto 1)/="11" else '0';
-	io_gg_data_port <= '1' when gg='1' and A(7 downto 3)="00000" and A(2 downto 0)/="111" else '0';
+	io_sms_port <= '1' when A(7 downto 6)="00" and (A(0)='1' or (effective_gg='1' and A(5 downto 3)="000")) else '0';
+	io_gg_port <= '1' when effective_gg='1' and A(7 downto 3)="00000" and A(2 downto 1)/="11" else '0';
+	io_gg_data_port <= '1' when effective_gg='1' and A(7 downto 3)="00000" and A(2 downto 0)/="111" else '0';
 	io_systeme_port <= '1' when io_upper_port='1' and systeme='1' else '0';
 	io_sc_mode <= '1' when gg='0' and systeme='0' and (sc3000_en='1' or sk1100_en='1') else '0';
 	io_sc_ppi_port <= '1' when A(7 downto 5)="110" and io_sc_mode='1' else '0';
@@ -897,8 +1085,104 @@ port map(
 		q			=> boot_rom_D_out
 	);
 
-	-- Drive the output port from the internal signal
-	rom_a <= rom_a_i;
+	-- Temporary diagnostic aliases confirmed by the physical dump/savestates.
+	-- These are not intended to become a permanent per-game database: once
+	-- all outer Flash address/control lines are understood, replace this table
+	-- with the equivalent mapper equation.
+	evolution_game_select <= evolution_game_bank62 & evolution_game_bank61;
+	evolution_menu_mode <= '1' when mapper_evolution = '1' and
+	                                evolution_3ffe /= x"87" and
+	                                evolution_3ffe /= x"97" and
+	                                evolution_3ffe /= x"C7" else '0';
+	-- Record $2638 (Sonic Drift 2) is the sole game record in the flash image
+	-- that programs this board configuration.  It selects the clone's Game
+	-- Gear-compatible CRAM and I/O behavior while retaining TV-sized output.
+	evolution_gg_mode <= '1' when mapper_evolution = '1' and
+	                              evolution_menu_mode = '0' and
+	                              evolution_8d = x"47" and
+	                              evolution_8e = x"00" and
+	                              evolution_8f = x"36" and
+	                              evolution_63 = x"18" else '0';
+	-- Menu/service space also uses the clone VDP's 12-bit CRAM, but retains
+	-- Evolution/SMS controller I/O. Keep the two hardware modes independent.
+	effective_vdp_gg <= gg or evolution_gg_mode or
+	                    (mapper_evolution and not evolution_3ffe(1));
+	effective_gg <= gg or evolution_gg_mode;
+	evolution_gg_active <= evolution_gg_mode;
+	-- Some patched interrupt handlers restore a selector with A21 asserted.
+	-- Resolve confirmed selector collisions while leaving standalone launches
+	-- of the corresponding upper pages intact.
+	evolution_effective_game_select <=
+		x"2800" when evolution_game_select = x"4800" and evolution_3ffe = x"97" else
+		-- The menu records are 16 bytes and follow physical-ROM order.  Use
+		-- their read address only where two games share the same final selector.
+		x"2C00" when evolution_game_select = x"4C00" and
+		                 evolution_launch_fetch_addr = x"20B8" else
+		x"2E00" when evolution_game_select = x"4E00" and
+		                 evolution_launch_fetch_addr = x"20C8" else
+		x"3200" when evolution_game_select = x"5200" and
+		                 evolution_launch_fetch_addr = x"20D8" else
+		x"A880" when evolution_game_select = x"6800" and
+		                 evolution_launch_fetch_addr = x"2358" else
+		x"2800" when evolution_game_select = x"4800" and
+		                 (evolution_prev_game_bank62 & evolution_prev_game_bank61) = x"2800" else
+		evolution_game_select;
+	with evolution_effective_game_select select evolution_selector_page <=
+		x"0180" when x"2180", -- timeout demo cycle: Color and Switch Test
+		x"01C0" when x"21C0", -- timeout demo cycle: Sonic
+		x"1040" when x"3040", -- Bonanza Bros.
+		x"1640" when x"5640", -- Alex Kidd in Miracle World
+		x"1C40" when x"5C40", -- Action Fighter
+		x"2000" when x"4000", -- Aerial Assault
+		x"2400" when x"2400", -- Alex Kidd: The Lost Stars
+		x"2800" when x"2800", -- Alex Kidd in Shinobi World
+		x"2C00" when x"2C00", -- Alex Kidd High Tech World
+		x"3200" when x"3200", -- Aztec Adventure
+		x"3400" when x"5400", -- Baku Baku Animal
+		x"3800" when x"5800", -- Battle Out Run
+		x"4200" when x"4200", -- Bubble Bobble
+		x"4600" when x"4600", -- Taito Chase H.Q.
+		x"4800" when x"4800", -- Cyber Shinobi
+		x"4800" when x"6800", -- Cyber Shinobi launch selector
+		x"4C00" when x"4C00", -- Dragon Crystal
+		x"4E00" when x"4E00", -- Double Target
+		x"5000" when x"5000", -- Enduro Racer
+		x"5200" when x"5200", -- ESWAT
+		x"0DC0" when x"4DC0", -- Columns
+		x"CF80" when x"8F80", -- Dr. Limpeza
+		x"B980" when x"9980", -- Bank Panic
+		x"D440" when x"9440", -- Aquaduto
+		x"D540" when x"9540", -- Bombeiros
+		x"DCC0" when x"BCC0", -- Bolas e Cores
+		x"DE00" when x"BE00", -- Acerte o Alvo
+		x"E100" when x"A100", -- Arqueiro
+		x"E000" when x"A000", -- Domine o Territorio
+		x"E540" when x"A540", -- Cava Cava
+		x"A000" when x"6000", -- Satellite 7
+		x"E200" when x"A200", -- Ataque dos Vermes
+		(evolution_game_bank62(7) &
+		 not (evolution_game_bank61(7) xor evolution_game_bank62(6)) &
+		 (evolution_game_bank61(6) xor evolution_game_bank61(7) xor
+		  evolution_game_bank62(0) xor evolution_game_bank62(5) xor
+		  evolution_game_bank62(6) xor evolution_game_bank62(7)) &
+		 evolution_game_bank62(4 downto 0) & evolution_game_bank61) when others;
+
+	-- Normal menu launches use the authoritative record-index table.  Keep the
+	-- reverse-engineered selector path as a fallback for service transitions or
+	-- malformed/unrecognised records.
+	evolution_game_page <= evolution_record_page(
+		evolution_launch_fetch_addr, evolution_selector_page);
+
+	-- Drive the captured game base plus the cartridge-relative Sega address.
+	rom_a <= std_logic_vector(
+		unsigned(evolution_game_page & x"00") +
+		-- Individual cartridges in the image decode at most six Sega bank
+		-- bits (1 MB).  Bits 7:6 written by games are not physical ROM lines.
+		resize(unsigned(rom_a_i(19 downto 0)), 24))
+		when mapper_evolution = '1' and
+		     (evolution_3ffe = x"87" or evolution_3ffe = x"97" or
+		      evolution_3ffe = x"C7") else
+		std_logic_vector(resize(unsigned(rom_a_i), 24));
 
 	-- External BIOS RAM: up to 256KB, written only during BIOS file download (BIOSWEN)
 	-- Read address uses rom_a_i (mapper-translated) so banking works correctly.
@@ -997,12 +1281,14 @@ port map(
 	mapper_eeprom_out <= mapper_eeprom;
 
 	-- glue logic
-	bal_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 0)="00000110" and gg='1' else '1';
-	vdp_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 6)="10" and (A(2)='0' or systeme='0') else '1';
+	bal_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 0)="00000110" and effective_gg='1' else '1';
+	vdp_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and evolution_io_port='0' and
+	                         not (evolution_menu_mode='1' and A(7 downto 0)=x"89") and
+	                         A(7 downto 6)="10" and (A(2)='0' or systeme='0') else '1';
 	vdp2_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 6)="10" and (A(2)='1' and systeme='1')  else '1';
-	vdp_RD_n <= RD_n when IORQ_n='0' and M1_n='1' and (A(7 downto 6)="01" or A(7 downto 6)="10") and (A(2)='0' or systeme='0') else '1';
+	vdp_RD_n <= RD_n when IORQ_n='0' and M1_n='1' and evolution_io_port='0' and (A(7 downto 6)="01" or A(7 downto 6)="10") and (A(2)='0' or systeme='0') else '1';
 	vdp2_RD_n <= RD_n when IORQ_n='0' and M1_n='1' and (A(7 downto 6)="01" or A(7 downto 6)="10") and (A(2)='1' and systeme='1') else '1';
-	psg_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 6)="01" and (A(2)='0' or systeme='0') else '1';
+	psg_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and evolution_io_port='0' and A(7 downto 6)="01" and (A(2)='0' or systeme='0') else '1';
 	psg2_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 6)="01" and (A(2)='1' and systeme='1') else '1';
 	ctl_WR_n <=	WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 6)="00" and A(0)='0' else '1';
 	io_WR_n  <=	WR_n when io_cycle='1' and
@@ -1018,11 +1304,12 @@ port map(
 		(
 			(io_upper_port='1' and io_sc_mode='0') or
 			io_sc_ppi_port='1' or
-			io_gg_port='1'
+			io_gg_port='1' or
+			evolution_io_port='1'
 		)
 	else '1';
-	fm_WR_n  <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 1)="1111000" else '1';
-	det_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 0)=x"F2" else '1';
+	fm_WR_n  <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 1)="1111000" and mapper_evolution='0' else '1';
+	det_WR_n <= WR_n when IORQ_n='0' and M1_n='1' and A(7 downto 0)=x"F2" and mapper_evolution='0' else '1';
 	IRQ_n <= vdp_IRQ_n when systeme='0' else vdp2_IRQ_n;
 					
 	ram_WR   <= not WR_n when ss_freeze = '0' and MREQ_n='0' and A(15 downto 14)="11" and sc_cart_ram_32k='0' else '0';
@@ -1041,6 +1328,32 @@ port map(
 
 	active_bios <= '1' when (bios_en = '1' and (ext_bios_sel = '0' or ext_bios_loaded = '1')) or (gg_bios_en = '1' and ext_gg_bios_loaded = '1') else '0';
 
+	-- Only cartridge visibility currently affects emulation. Preserve it in the
+	-- spare IO state bit; older states stored zero here (cartridge enabled).
+	io_state_out <= media_control(6) & io_state_out_i(30 downto 0);
+	process (clk_sys)
+	begin
+		if rising_edge(clk_sys) then
+			if RESET_n='0' then
+				-- Cartridge precedence must not bypass the BIOS at reset.
+				if bios_en='1' and gg='0' and
+				   ext_bios_sel='1' and ext_bios_loaded='1' then
+					media_control <= "111";
+				else
+					media_control <= "101";
+				end if;
+			elsif mapper_set='1' then
+				-- Legacy states without IO retain cartridge-enabled behavior.
+				media_control <= "101";
+			elsif io_state_set='1' then
+				-- Card/expansion have no backing media or emulated state yet.
+				media_control <= '1' & io_state_in(31) & '1';
+			elsif ss_freeze='0' and ctl_WR_n='0' and A(7 downto 0)=x"3E" then
+				media_control <= D_in(7 downto 5);
+			end if;
+		end if;
+	end process;
+
 	process (clk_sys)
 	begin
 		if rising_edge(clk_sys) then
@@ -1051,7 +1364,14 @@ port map(
 				-- Without this, restoring a cart game saved while BIOS was active but
 				-- disabled (bootloader_n=1) would leave bootloader_n=0 (reset default)
 				-- so the Z80 would read BIOS ROM instead of cart ROM → instant crash.
-				bootloader_n <= mapper_in(54);
+				if mapper_evolution = '1' and
+				   evolution_ss_in(31 downto 16) = x"E132" then
+					-- Evolution repurposes the mapper word for its launch record.
+					-- The flash image is already the active cartridge at restore time.
+					bootloader_n <= '1';
+				else
+					bootloader_n <= mapper_in(54);
+				end if;
 			elsif ss_freeze = '0' and ctl_WR_n='0' then
 				if (ext_bios_sel='1' and ext_bios_loaded='1') or
 				   (gg_bios_en='1' and ext_gg_bios_loaded='1') then
@@ -1079,8 +1399,8 @@ port map(
 	-- When ext BIOS is active and BIOS ROM is enabled (bootloader_n=0):
 	-- serve all ROM banks (0, 1, 2) from SPRAM so the full 256KB BIOS can run.
 	-- When BIOS ROM is disabled (bootloader_n=1, triggered by port $3E bit3=1):
-	-- serve SDRAM (cartridge) so the BIOS detection code (running from RAM) can
-	-- read the cartridge header. The BIOS then re-enables itself (bit3=0) if no
+	-- serve SDRAM only when the cartridge is selected; card/expansion probes
+	-- see an empty slot. The BIOS then re-enables itself (bit3=0) if no
 	-- valid cart is found, causing bootloader_n to go back to 0, and JP $0000
 	-- will fall back into the SPRAM BIOS - giving the correct no-cart loop.
 	active_bios_D_out <= ext_bios_D_out when (ext_bios_sel='1' and ext_bios_loaded='1') else boot_rom_D_out;
@@ -1092,9 +1412,19 @@ port map(
 		jang_rev4 when mapper_janggun = '1' and bootloader_n = '1' and A(15 downto 13) = "101" else
 		'0';
 
+	-- Original Master System hardware gives cartridge data precedence when
+	-- the BIOS and cartridge are enabled simultaneously. The core models
+	-- this SMS1 behavior for external SMS BIOS operation.
+	cart_precedence <= '1' when (gg='0' and gg_bios_en='0' and bios_en='1'
+	                               and ext_bios_sel='1' and ext_bios_loaded='1' and dbr='1'
+	                               and bootloader_n='0' and media_control(6)='0') else '0';
+
 	irom_D_out <=	ext_gg_bios_D_out when (bootloader_n='0' and gg_bios_en='1' and ext_gg_bios_loaded='1' and A(15 downto 14)="00")
-	               else active_bios_D_out when (bootloader_n='0' and gg_bios_en='0' and A(15 downto 14)="00")
-	               else ext_bios_D_out when (bootloader_n='0' and gg_bios_en='0' and ext_bios_sel='1' and ext_bios_loaded='1' and A(15 downto 14)/="11")
+	               else active_bios_D_out when (bootloader_n='0' and gg_bios_en='0' and cart_precedence='0' and A(15 downto 14)="00")
+	               else ext_bios_D_out when (bootloader_n='0' and gg_bios_en='0' and ext_bios_sel='1' and ext_bios_loaded='1' and cart_precedence='0' and A(15 downto 14)/="11")
+	               -- External SMS BIOS media probes: port $3E bit 6 is active low.
+	               else x"FF" when (bootloader_n='1' and bios_en='1' and gg='0' and gg_bios_en='0'
+	                               and ext_bios_sel='1' and ext_bios_loaded='1' and media_control(6)='1')
 	               -- Empty cartridge slot: data lines float high on real hardware.
 	               -- Without this, SDRAM returns stale data from the last loaded ROM,
 	               -- causing BIOSes that check for non-0xFF bytes (Korea) to
@@ -1122,11 +1452,13 @@ port map(
 		process (IORQ_n,A,vdp_D_out,vdp2_D_out,io_D_out,irom_D_out,ram_D_out,nvram_D_out,
 					nvram_ex,nvram_e,nvram_cme,gg,det_D,fm_ena,bootloader_n,systeme,io_upper_port,io_gg_data_port,
 					sc_cart_ram_rd,sc_multicart_open,mapper_dahjee_a,
-					mapper_eeprom,eeprom_enabled,eeprom_D_out,eeprom_bus_active,MREQ_n)
+					mapper_eeprom,eeprom_enabled,eeprom_D_out,eeprom_bus_active,MREQ_n,evolution_io_port)
 	begin
 		if IORQ_n='0' then
-			if A(7 downto 0)=x"F2" and fm_ena = '1' and systeme='0' then
+			if A(7 downto 0)=x"F2" and fm_ena = '1' and systeme='0' and mapper_evolution='0' then
 				D_out <= "11111"&det_D;
+			elsif evolution_io_port='1' then
+				D_out <= io_D_out;
 			elsif io_upper_port='1' or io_gg_data_port='1' then
 				D_out(6 downto 0) <= io_D_out(6 downto 0);
 				-- during bootload, we trick the io ports so bit 7 indicates gg or sms game
@@ -1176,11 +1508,21 @@ port map(
 		else
 			if rising_edge(clk_sys) then
 				if mapper_set = '1' then
-					mapper_msx <= mapper_in(56);
-					if mapper_in(56) = '1' then
+					if mapper_evolution = '1' and
+					   evolution_ss_in(31 downto 16) = x"E132" then
+						-- Evolution's record address occupies the generic mapper flag
+						-- bits; never interpret it as an MSX mapper selection.
+						mapper_msx <= '0';
+						mapper_msx_lock <= false;
+						mapper_msx_lock0 <= false;
+						mapper_msx_check0 <= false;
+						mapper_msx_check1 <= false;
+					elsif mapper_in(56) = '1' then
+						mapper_msx <= '1';
 						mapper_msx_lock <= true;
 						mapper_msx_lock0 <= true;
 					else
+						mapper_msx <= '0';
 						mapper_msx_lock <= false;
 						mapper_msx_lock0 <= false;
 						mapper_msx_check0 <= false;
@@ -1244,8 +1586,31 @@ port map(
 		else
 			if rising_edge(clk_sys) then
 				eeprom_soft_reset <= '0';
+				-- The Evolution launcher stores data in the top bytes of RAM,
+				-- which alias the standard SMS mapper registers in this core.
+				-- Start each selected game with the normal Sega power-on banks.
+				if evolution_game_launch = '1' then
+					bank0 <= x"00";
+					bank1 <= x"01";
+					bank2 <= x"02";
+					bank3 <= x"03";
+				end if;
 				if mapper_set = '1' then
-					if mapper_janggun = '1' then
+					if mapper_evolution = '1' and
+					   evolution_ss_in(31 downto 16) = x"E132" then
+						bank0 <= mapper_in(47 downto 40);
+						bank1 <= mapper_in(39 downto 32);
+						bank2 <= mapper_in(31 downto 24);
+						bank3 <= mapper_in(23 downto 16);
+						nvram_e <= '0';
+						nvram_ex <= '0';
+						nvram_p <= '0';
+						nvram_cme <= '0';
+						lock_mapper_B <= '0';
+						mapper_codies <= '0';
+						mapper_codies_lock <= '0';
+						mapper_4pak <= '0';
+					elsif mapper_janggun = '1' then
 						jang_bank1 <= mapper_in(5 downto 0);
 						jang_rev1  <= mapper_in(7);
 						jang_bank2 <= mapper_in(13 downto 8);
@@ -1527,7 +1892,7 @@ port map(
 	end process;
 
 	mapper_manual_force <= mapper_lock or mapper_codies_force or mapper_dahjee_a_force or
-	                       mapper_linear_force or mapper_zemina_force;
+	                       mapper_linear_force or mapper_zemina_force or mapper_evolution;
 
 	-- Janggun mapper (Janggun-ui Adeul): CRC32-based auto-detection.
 	-- CRC32 0x192949D5
@@ -1628,7 +1993,13 @@ port map(
 	-- [31:24]bank3 [23:16]bank2 [15:8]bank1 [7:0]bank0
 	-- Note: when systeme='1', bits [7:0] mirror IO port 0xF7:
 	--   [7]=vdp_se_bank [6]=vdp2_se_bank [5]=vdp_cpu_bank [3:0]=rom_bank
+	-- Evolution operational layout: [63:48] menu record address,
+	-- [47:40] bank0, [39:32] bank1, [31:24] bank2, [23:16] bank3,
+	-- [15:8] active $3FFE mode, [7:0] current $61 latch.
+	-- Remaining board latches are stored in the dedicated extra header fields.
 	mapper_out(63 downto 8) <=
+	              evolution_launch_fetch_addr & bank0 & bank1 & bank2 & bank3 & evolution_3ffe
+	              when mapper_evolution = '1' else
 	              detect_linear & detect_wonderkid & detect_castle & mapper_codies_lock &
 	              lock_mapper_B & mapper_codies & mapper_4pak & mapper_msx &
 	              detect_zemina_static & bootloader_n & nvram_cme & nvram_p & nvram_ex & nvram_e &
@@ -1643,7 +2014,8 @@ port map(
 	              detect_sega_locked & detect_dahjee_a &
 	              nem_bank0 & pak4_reg2 & bank3 & bank2 & bank1;
 
-	mapper_out(7 downto 0) <= vdp_se_bank & vdp2_se_bank & vdp_cpu_bank & '0' & rom_bank when systeme='1' else
+	mapper_out(7 downto 0) <= evolution_bank61 when mapper_evolution = '1' else
+	                          vdp_se_bank & vdp2_se_bank & vdp_cpu_bank & '0' & rom_bank when systeme='1' else
 	                          jang_rev1 & "0" & jang_bank1 when mapper_janggun = '1' else
 	                          bank0;
 
@@ -1767,11 +2139,22 @@ port map(
 				wonderkid_write_count <= 0;
 				sega_mapper_write_seen <= '0';
 			elsif mapper_set = '1' then
-				detect_castle      <= mapper_in(61);
-				detect_wonderkid   <= mapper_in(62);
-				detect_linear      <= mapper_in(63);
-				detect_dahjee_a    <= mapper_in(48);
-				detect_sega_locked <= mapper_in(49);
+				if mapper_evolution = '1' and
+				   evolution_ss_in(31 downto 16) = x"E132" then
+					-- These positions contain the Evolution launch-record address,
+					-- not legacy auto-detection flags.
+					detect_castle      <= '0';
+					detect_wonderkid   <= '0';
+					detect_linear      <= '0';
+					detect_dahjee_a    <= '0';
+					detect_sega_locked <= '0';
+				else
+					detect_castle      <= mapper_in(61);
+					detect_wonderkid   <= mapper_in(62);
+					detect_linear      <= mapper_in(63);
+					detect_dahjee_a    <= mapper_in(48);
+					detect_sega_locked <= mapper_in(49);
+				end if;
 				mapper_detect_ticks <= to_unsigned(65535, 16);
 				castle_write_count <= 0;
 				bank_write_seen <= '0';

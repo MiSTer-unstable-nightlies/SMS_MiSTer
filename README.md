@@ -6,6 +6,7 @@ This core is a port of Ben's Sega Master System implementation for the Papilio. 
 
 * Sega Master System, Game Gear, SC-3000 and [SG-1000](https://en.wikipedia.org/wiki/SG-1000) Support
 * [Sega System E arcade hardware](https://segaretro.org/Sega_System_E) Support
+* Master System Evolution/Noza hardware and 132-game flash memory Support
 * NTSC & PAL Support
 * Hide Borders Option - Allows you to fill the screen vertically without black borders.
 * FM Audio Support
@@ -14,6 +15,7 @@ This core is a port of Ben's Sega Master System implementation for the Papilio. 
 * Extended Game Gear Resolution Option
 * Z80 Turbo Option
 * Lightgun, Paddle controls, Keyboard(SK-1100) and Multitap Support
+* Independent SMS, Mega Drive 3-button and 6-button controller emulation per port
 * Gear to Gear link cable over USERIO
 * BIOS Loading Support
 * Savestates
@@ -50,3 +52,24 @@ This core is a port of Ben's Sega Master System implementation for the Papilio. 
 | PC6 / NMI  | 7   |USER_IO[6]|
 | GND | 8   |GND|
 
+### Controller types
+
+Under **Input**, choose **P1 Controller** and **P2 Controller** independently. Both default to **SMS 2 Buttons**. **Swap Joysticks** exchanges the MiSTer devices feeding the ports; each port keeps its selected controller type.
+
+In either Mega Drive mode, **Fire 1** acts as B and **Fire 2** as C. Map **Mega Drive A**, **Mega Drive Start**, **Mega Drive X**, **Mega Drive Y**, **Mega Drive Z** and **Mega Drive Mode** through the joystick configuration menu as needed. The six additional buttons and SaveState have no automatic mapping. Existing saved mappings remain usable. **Pause** continues to operate the console's Pause button independently of Mega Drive Start.
+
+Mega Drive modes reproduce the controller's TH protocol, including the identification sequence and timeout for six-button pads. Games must support that protocol to read the additional buttons. Keep SMS mode for games incompatible with Mega Drive controllers. The existing Japanese-region TH restrictions still apply.
+
+SNAC, lightgun, paddle and multitap modes take precedence over these emulated controller types on both ports. Game Gear and System E keep their existing controls.
+
+### Master System Evolution
+
+The core supports the Master System Evolution/Noza hardware used by the 132-game console, not just its flash mapper. This includes the original launcher menu, Evolution board registers and I/O, reset wiring, included Master System software and Game Gear-compatible titles. Load a user-supplied 16 MiB flash dump as an `.sms` file; individual games do not need to be extracted.
+
+The two known flash revisions are detected automatically by their complete ROM CRC-32 (`0C90A6CA` or `CBD7FF82`), regardless of filename. Loading either exact image activates the full Evolution hardware profile automatically, unless another mapper is explicitly forced from the menu.
+
+The Evolution profile also enables the clone VDP behavior required by the software, including its 224-line name-table addressing, menu interrupt and VRAM-write timing, extended palette modes and relaxed per-line sprite limit. Game Gear-compatible palette and controller behavior is selected automatically for the applicable included titles while retaining TV-sized video output.
+
+Save states are supported in both the launcher and included games. As with other cartridge save states, keep the same flash image loaded when restoring a state.
+
+Press **Pause + Fire 1 + Fire 2** together to reset back to the Evolution launcher. With a port configured as **MD 6 Buttons**, **X + Y + Z** provides the equivalent shortcut. These combinations are active only while an Evolution flash image is running.

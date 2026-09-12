@@ -21,6 +21,7 @@ port (
 	smode_M3:			in  std_logic;
 	smode_M4:			in  std_logic;
 	ysj_quirk:			in  std_logic;
+	legacy_ext_nt:	in  std_logic := '0';
 	y:					in  std_logic_vector(7 downto 0);
 	screen_y:			in  std_logic_vector(8 downto 0);
 	text_fg_color:		in  std_logic_vector(3 downto 0);
@@ -183,7 +184,9 @@ begin
 					end if;
 
 				elsif smode_M4='1' then
-					if (smode_M1='1' or smode_M3='1') then
+					-- The Evolution clone extends the visible height without the
+					-- SMS2 $x700 name-table remap. Keep R2's ordinary $x800 base.
+					if (smode_M1='1' or smode_M3='1') and legacy_ext_nt='0' then
 						char_address(12 downto 5) := table_address(13 downto 12) & ("011100" + y(7 downto 3));
 					else
 						char_address(12 downto 10) := table_address(13 downto 11);

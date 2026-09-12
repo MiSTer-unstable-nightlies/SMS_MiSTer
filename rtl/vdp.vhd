@@ -17,6 +17,11 @@ entity vdp is
 		se_bank:			in  STD_LOGIC;
 		sp64:				in  STD_LOGIC;
 		HL:				in  STD_LOGIC;
+		-- Mask only IRQ delivery; the line counter and pending flag keep running.
+		-- This lets clone-specific glue coalesce a last-line HINT with VINT.
+		mask_line_irq:	in  STD_LOGIC := '0';
+		capture_cpu_edges: in STD_LOGIC := '0';
+		legacy_ext_nt:	in  STD_LOGIC := '0';
 		RD_n:				in  STD_LOGIC;
 		WR_n:				in  STD_LOGIC;
 		IRQ_n:			out STD_LOGIC;
@@ -129,7 +134,8 @@ architecture Behavioral of vdp is
 	signal cram_cpu_WE:		std_logic;
 	signal vram_cpu_D_out:	std_logic_vector(7 downto 0);
 	signal vram_cpu_D_out_raw: std_logic_vector(7 downto 0);  -- raw port-A output (shared with SS DMA)
-	signal vram_cpu_D_outl:	std_logic_vector(7 downto 0);	
+	signal vram_cpu_D_outl:	std_logic_vector(7 downto 0);
+	signal cpu_write_data:	std_logic_vector(7 downto 0) := (others => '0');
 	signal xram_cpu_A_incr:	std_logic := '0';
 	signal xram_cpu_read:	std_logic := '0';
 
@@ -209,6 +215,7 @@ begin
 		ce_sp				=> ce_sp,
 		ggres					=> ggres,
 		sp64				=> sp64,
+		legacy_ext_nt	=> legacy_ext_nt,
 		vram_A			=> vram_vdp_A,
 		vram_D			=> vram_vdp_D,
 		cram_A			=> cram_vdp_A,
@@ -259,12 +266,13 @@ begin
 												ss_vram_A  when ss_vram_en='1' else
 												vram_cpu_A;
 	vram_portA_wren    <= ss_vram_WE or (vram_cpu_WE and not ss_vram_en);
-	vram_portA_data    <= ss_vram_WD when ss_vram_WE='1' else D_in;
+	vram_portA_data    <= ss_vram_WD when ss_vram_WE='1' else cpu_write_data;
 
 	vdp_vram_inst : entity work.dpram
-    generic map
-    (
-      widthad_a		=> 15
+	generic map
+	(
+		widthad_a		=> 15,
+		mixed_port_rdwr => "OLD_DATA"
     )
     port map
     (
@@ -302,8 +310,10 @@ begin
 	);
 
 	cram_vdp_A_in <= xram_cpu_A(4 downto 0) when gg='0' else xram_cpu_A(5 downto 1);
-	cram_vdp_D_in <= (D_in(5 downto 4) & D_in(5 downto 4) & D_in(3 downto 2) & D_in(3 downto 2) & D_in(1 downto 0) & D_in(1 downto 0))
-							when gg='0' else (D_in(3 downto 0) & cram_latch);
+	cram_vdp_D_in <= (cpu_write_data(5 downto 4) & cpu_write_data(5 downto 4) &
+	                    cpu_write_data(3 downto 2) & cpu_write_data(3 downto 2) &
+	                    cpu_write_data(1 downto 0) & cpu_write_data(1 downto 0))
+							when gg='0' else (cpu_write_data(3 downto 0) & cram_latch);
 	cram_cpu_WE <= data_write when to_cram and ((gg='0') or (xram_cpu_A(0)='1')) and WR_direct='0' else '0';
 	vram_cpu_WE <= data_write when (WR_direct='1' or not to_cram) else '0';
 	vram_cpu_A <= not se_bank & A_direct & A when WR_direct='1' else se_bank & xram_cpu_A;
@@ -359,6 +369,11 @@ begin
 	variable reset_set: boolean ;
 	begin
 		if reset_n='0' then
+			old_WR_n        <= '1';
+			old_RD_n        <= '1';
+			old_WR_direct   <= '0';
+			old_HL          <= '0';
+			cpu_write_data  <= (others => '0');
 			disable_hscroll<= '0';--36
 			disable_vscroll <= '0';
 			mask_column0	<= '1';--
@@ -429,6 +444,7 @@ begin
 				old_RD_n        <= RD_n;
 				old_WR_direct   <= WR_direct;
 				old_HL          <= HL;
+				cpu_write_data  <= D_in;
 				data_write      <= '0';
 				xram_cpu_A_incr <= '0';
 			end if;
@@ -438,16 +454,22 @@ begin
 				latched_x <= x(8 downto 1);
 			end if;
 
-			if ce_vdp = '1' then
+			-- The Evolution menu performs tightly packed OUTI/OTIR transfers.
+			-- Its clone VDP observes each CPU write edge; sampling only on ce_vdp
+			-- can occasionally lose one byte and shift the rest of a tile row.
+			if ce_vdp = '1' or
+			   (capture_cpu_edges = '1' and old_WR_n /= WR_n) then
 				old_WR_n <= WR_n;
 				old_RD_n <= RD_n;
 				old_WR_direct <= WR_direct;
 
 				if old_WR_direct = '0' and WR_direct='1' then
+					cpu_write_data <= D_in;
 					data_write <= '1';
 				end if;
 				if old_WR_n = '1' and WR_n='0' then
 					if A(0)='0' then
+						cpu_write_data <= D_in;
 						data_write <= '1';
 						xram_cpu_A_incr <= '1';
 						address_ff		<= '0';
@@ -602,7 +624,8 @@ begin
 				line_overflow <= ss_regs_in(119);
 				xspr_collide_shift <= (others => '0');
 				-- Immediately restore IRQ_n level corresponding to the restored snapshot state
-				if ((ss_regs_in(115) = '1' and ss_regs_in(8) = '1') or (ss_regs_in(116) = '1' and ss_regs_in(3) = '1')) then
+				if ((ss_regs_in(115) = '1' and ss_regs_in(8) = '1') or
+				    (ss_regs_in(116) = '1' and ss_regs_in(3) = '1' and mask_line_irq = '0')) then
 					if ss_regs_in(114 downto 112) = "000" then
 						IRQ_n <= '0';
 					else
@@ -645,7 +668,8 @@ begin
 						line_overflow <= '1'; -- Spr over many lines
 					end if;
 
-					if ((vbl_irq='1' and irq_frame_en='1') or (hbl_irq='1' and irq_line_en='1'))
+					if ((vbl_irq='1' and irq_frame_en='1') or
+					    (hbl_irq='1' and irq_line_en='1' and mask_line_irq='0'))
 						and not reset_flags then
 						if irq_delay = "000" then
 							IRQ_n <= '0';

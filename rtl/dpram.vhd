@@ -10,6 +10,7 @@ ENTITY dpram IS
 		init_file			: string := " ";
 		widthad_a			: natural;
 		width_a				: natural := 8;
+		mixed_port_rdwr : string := "DONT_CARE";
     outdata_reg_a : string := "UNREGISTERED";
     outdata_reg_b : string := "UNREGISTERED"
 	);
@@ -57,6 +58,7 @@ ARCHITECTURE SYN OF dpram IS
 		power_up_uninitialized		: STRING;
 		read_during_write_mode_port_a		: STRING;
 		read_during_write_mode_port_b		: STRING;
+		read_during_write_mode_mixed_ports : STRING;
 		widthad_a		: NATURAL;
 		widthad_b		: NATURAL;
 		width_a		: NATURAL;
@@ -104,6 +106,7 @@ BEGIN
 		power_up_uninitialized => "FALSE",
 		read_during_write_mode_port_a => "NEW_DATA_NO_NBE_READ",
 		read_during_write_mode_port_b => "NEW_DATA_NO_NBE_READ",
+		read_during_write_mode_mixed_ports => mixed_port_rdwr,
 		widthad_a => widthad_a,
 		widthad_b => widthad_a,
 		width_a => width_a,
