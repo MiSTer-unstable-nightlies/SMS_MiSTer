@@ -166,6 +166,14 @@ entity system is
 		psg_out      : out STD_LOGIC_VECTOR(55 downto 0);
 		psg_in       : in  STD_LOGIC_VECTOR(55 downto 0) := (others => '0');
 		psg_set      : in  STD_LOGIC := '0';
+		psg_ext_out, psg2_ext_out : out STD_LOGIC_VECTOR(95 downto 0);
+		psg_ext_in, psg2_ext_in : in STD_LOGIC_VECTOR(95 downto 0) := (others => '0');
+		psg_div_out : out STD_LOGIC_VECTOR(3 downto 0);
+		psg_div_in : in STD_LOGIC_VECTOR(3 downto 0) := (others => '0');
+		audio_control_out : out STD_LOGIC_VECTOR(10 downto 0);
+		audio_control_in : in STD_LOGIC_VECTOR(10 downto 0) := (others => '0');
+		audio_quiescent, audio_phase_out : out STD_LOGIC;
+		audio_phase_in, audio_phase_set, audio_ext_set : in STD_LOGIC := '0';
 		mapper_out   : out STD_LOGIC_VECTOR(63 downto 0);
 		mapper_in    : in  STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
 		mapper_set   : in  STD_LOGIC := '0';
@@ -211,6 +219,8 @@ entity system is
 end system;
 
 architecture Behavioral of system is
+    signal psg_div1, psg_div2 : std_logic_vector(3 downto 0);
+    signal psg_quiet1, psg_quiet2 : std_logic;
 	
 	signal RD_n:				std_logic;
 	signal WR_n:				std_logic;
@@ -287,7 +297,6 @@ architecture Behavioral of system is
 	signal io_state_out_i:  std_logic_vector(31 downto 0);
 	signal active_bios:     std_logic;
 	signal irom_D_out:		std_logic_vector(7 downto 0);
-	signal irom_RD_n:			std_logic := '1';
 
 	signal bank0:				std_logic_vector(7 downto 0);
 	signal bank1:				std_logic_vector(7 downto 0);
@@ -315,7 +324,6 @@ architecture Behavioral of system is
 	signal PSG2_outL:			std_logic_vector(10 downto 0);
 	signal PSG2_outR:			std_logic_vector(10 downto 0);
 	signal psg2_WR_n:			std_logic;
-	signal bal2_WR_n:			std_logic;
 
 	signal FM_out:				std_logic_vector(13 downto 0);
 	signal FM_gated:			std_logic_vector(12 downto 0);
@@ -334,8 +342,6 @@ architecture Behavioral of system is
 	signal det_WR_n:	   	std_logic;
 
 	signal HL:					std_logic;
-	signal TH_Ain:				std_logic;
-	signal TH_Bin:				std_logic;
 	signal sc_multicart_page:	std_logic_vector(6 downto 0);
 	signal io_cycle:			std_logic;
 	signal evolution_io_port:	std_logic;
@@ -379,7 +385,6 @@ architecture Behavioral of system is
 	signal detect_zemina_static : std_logic;
 	signal detect_codies_static : std_logic;
 	signal detect_castle : std_logic;
-	signal detect_dahjee_a : std_logic;
 	signal detect_linear : std_logic;
 	signal detect_wonderkid : std_logic;
 	signal detect_sega_locked : std_logic;
@@ -506,7 +511,7 @@ begin
 			detect_zemina_static_o => detect_zemina_static,
 			detect_codies_static_o => detect_codies_static,
 			detect_castle_o => detect_castle,
-			detect_dahjee_a_o => detect_dahjee_a,
+			detect_dahjee_a_o => open,
 			detect_linear_o => detect_linear,
 			detect_wonderkid_o => detect_wonderkid,
 			detect_sega_locked_o => detect_sega_locked,
@@ -541,7 +546,6 @@ begin
 		clk        => clk_sys,
 		reset_n    => RESET_n,
 		enable     => mapper_evolution,
-		bios_active => not bootloader_n,
 		cpu_a      => A,
 		mreq_n     => MREQ_n,
 		iorq_n     => IORQ_n,
@@ -753,7 +757,10 @@ begin
 		rst		=> not RESET_n,
 		ss_out => psg_out,
 		ss_set => psg_set,
-		ss_in  => psg_in
+		ss_in  => psg_in,
+        ss_ext_out => psg_ext_out, ss_ext_in => psg_ext_in,
+        ss_ext_set => audio_ext_set, ss_div_out => psg_div1,
+        ss_div_in => psg_div_in, ss_quiescent => psg_quiet1
 	);
 	
 	psg2_inst: jt89
@@ -771,7 +778,10 @@ begin
 		rst		=> not RESET_n,
 		ss_out => psg2_out_i,
 		ss_set => psg2_set,
-		ss_in  => psg2_in
+		ss_in  => psg2_in,
+        ss_ext_out => psg2_ext_out, ss_ext_in => psg2_ext_in,
+        ss_ext_set => audio_ext_set and systeme, ss_div_out => psg_div2,
+        ss_div_in => psg_div_in, ss_quiescent => psg_quiet2
 	);
 	
 	fm: work.opll
@@ -819,10 +829,21 @@ mix2_inR <= (others=>'0') when psg_enables(1)='1' else (PSG2_outR(10) & PSG2_out
 -- This version shift FM left one place and PSG right by one place, so the volume
 -- is four times higher.  I haven't yet found a game in which this clips.
 
+psg_div_out <= psg_div1;
+audio_control_out <= det_D & PSG_mux;
+audio_quiescent <= psg_quiet1 and (psg_quiet2 or not systeme);
+-- synthesis translate_off
+process(clk_sys) begin
+    if rising_edge(clk_sys) and ss_freeze='1' and psg_quiet1='1' and psg_quiet2='1' and systeme='1' then
+        assert psg_div1=psg_div2 report "PSG divider mismatch at quiescent capture" severity failure;
+    end if;
+end process;
+-- synthesis translate_on
+
 mix : entity work.AudioMix
 port map(
 	clk => clk_sys,
-	reset_n => RESET_n,
+    ss_phase_out => audio_phase_out, ss_phase_in => audio_phase_in, ss_phase_set => audio_phase_set,
 	audio_in_l1 => signed(mix_inL & "000"),
 	audio_in_l2 => signed(mix2_inL & "000"),
 	audio_in_r1 => signed(mix_inR & "000"),
@@ -1108,9 +1129,7 @@ port map(
 			D_in       => D_in,
 			D_out      => eeprom_D_out,
 			WR_n       => WR_n,
-			RD_n       => RD_n,
 			MREQ_n     => MREQ_n,
-			M1_n       => M1_n,
 			enabled    => eeprom_enabled,
 			mapper_eeprom => mapper_eeprom,
 			bus_active => eeprom_bus_active,
@@ -1328,6 +1347,9 @@ port map(
 			if RESET_n='0' then 
 				det_D <= "111";
 				PSG_mux <= x"FF";
+            elsif audio_ext_set='1' then
+                det_D <= audio_control_in(10 downto 8);
+                PSG_mux <= audio_control_in(7 downto 0);
 			elsif ss_freeze = '0' and det_WR_n='0' then
 				det_D <= D_in(2 downto 0);
 			elsif ss_freeze = '0' and bal_WR_n='0' then
@@ -1375,7 +1397,6 @@ port map(
 			evolution_game_launch => evolution_game_launch,
 			mapper_set => mapper_set,
 			mapper_evolution => mapper_evolution,
-			evolution_ss_in => evolution_ss_in,
 			mapper_in => mapper_in,
 			mapper_janggun => mapper_janggun,
 			systeme => systeme,
